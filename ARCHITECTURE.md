@@ -33,6 +33,7 @@ CREATE TABLE dbo.ArchiveSettings
 1. **儲存設定**：使用者於 `/ArchiveSettings/Index` 填完表單後提交，`ArchiveSettingsController.Save` 透過 `ArchiveSettingRepository.UpsertAsync` 寫入設定表。
 2. **啟用 / 停用**：每筆設定帶有 `Enabled`，`ArchiveExecutionService` 只會對啟用的設定執行搬移，未啟用的設定會直接略過並回報提示訊息。
 3. **開始搬移**：按下「開始搬移」按鈕後，`ArchiveSettingsController.Run` 呼叫 `ArchiveExecutionService.RunOnceAsync`。流程中若任一表發生例外，會記錄詳細錯誤並回傳到頁面顯示。
+   - 前端送出「開始搬移」時會透過 SweetAlert2 顯示不可關閉的 Loading 視窗（含 Spinner），流程結束後再依成功 / 失敗彈出提示並呈現訊息。
 4. **搬移線上庫 → 歷史庫**：`ArchiveExecutionService` 依設定抓取超過 `OnlineRetentionMonths` 的資料，使用 `DynamicSqlHelper.BuildInsertSql`（內含 `NOT EXISTS`）寫入目標庫，再以 `IN (@Ids)` 批次刪除來源庫資料。
 5. **歷史庫 → CSV**：若 `CsvEnabled`，則針對超過 `HistoryRetentionMonths` 的歷史資料批次匯出 CSV（依 `CsvOptions.MaxRowsPerFile` 分段，檔名使用 `CsvOptions.FileNameFormat`），成功後以 `IN (@Ids)` 刪除目標庫批次。
 6. **重試與日誌**：每個批次包在 `RetryPolicyExecutor` 中，依 `RetryPolicySettings` 決定重試次數與間隔；Serilog 透過 `AppLoggingOptions` 設定輸出。

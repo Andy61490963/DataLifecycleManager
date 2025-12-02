@@ -157,7 +157,7 @@
             <div class="card-header">手動執行搬移</div>
             <div class="card-body">
                 <p class="text-muted">按下「開始搬移」後會依照上方已儲存的設定同步執行一次 DB1 → DB2 → CSV → Delete 流程。</p>
-                <form asp-action="Run" method="post">
+                <form asp-action="Run" method="post" id="runForm">
                     <button type="submit" class="btn btn-danger w-100">開始搬移</button>
                     @Html.AntiForgeryToken()
                 </form>
@@ -184,6 +184,61 @@
     </div>
 </div>
 
-@section Scripts {
+@section scripts {
     <partial name="_ValidationScriptsPartial" />
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const runForm = document.getElementById('runForm');
+            if (runForm) {
+                runForm.addEventListener('submit', () => {
+                    Swal.fire({
+                        title: '搬移作業進行中',
+                        html: '<div class="d-flex flex-column align-items-center gap-2">' +
+                            '<div class="spinner-border text-primary" role="status"></div>' +
+                            '<span>系統正在執行搬移，請稍候...</span>' +
+                            '</div>',
+                        allowOutsideClick: false,
+                        allowEscapeKey: false,
+                        allowEnterKey: false,
+                        showConfirmButton: false
+                    });
+                });
+            }
+
+            @if (Model.ExecutionSucceeded.HasValue)
+            {
+                var payload = new
+                {
+                    success = Model.ExecutionSucceeded.Value,
+                    messages = Model.ExecutionMessages
+                };
+
+                <text>
+                    const executionResult = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(payload));
+                    showExecutionResult(executionResult);
+                </text>
+            }
+        });
+
+        function showExecutionResult(result) {
+            if (!result) {
+                return;
+            }
+
+            const messages = (result.messages || []).map(message => `<div class="text-start">${escapeHtml(message)}</div>`).join('');
+            Swal.fire({
+                icon: result.success ? 'success' : 'error',
+                title: result.success ? '搬移完成' : '搬移失敗',
+                html: messages || '搬移流程已完成。',
+                confirmButtonText: '關閉'
+            });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text ?? '';
+            return div.innerHTML;
+        }
+    </script>
 }
