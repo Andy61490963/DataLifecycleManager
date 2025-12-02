@@ -3,7 +3,6 @@ using DataLifecycleManager.Repositories;
 using DataLifecycleManager.Services;
 using DataLifecycleManager.ViewModels;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging;
 
 namespace DataLifecycleManager.Controllers;
 
