@@ -15,12 +15,12 @@
 
                     <div class="col-md-6">
                         <label asp-for="Form.SourceConnectionName" class="form-label"></label>
-                        <input asp-for="Form.SourceConnectionName" class="form-control" placeholder="可輸入名稱或完整連線字串" />
+                        <input asp-for="Form.SourceConnectionName" class="form-control" placeholder="輸入完整連線字串" />
                         <span asp-validation-for="Form.SourceConnectionName" class="text-danger"></span>
                     </div>
                     <div class="col-md-6">
                         <label asp-for="Form.TargetConnectionName" class="form-label"></label>
-                        <input asp-for="Form.TargetConnectionName" class="form-control" placeholder="可輸入名稱或完整連線字串" />
+                        <input asp-for="Form.TargetConnectionName" class="form-control" placeholder="輸入完整連線字串" />
                         <span asp-validation-for="Form.TargetConnectionName" class="text-danger"></span>
                     </div>
 
@@ -115,8 +115,19 @@
                         {
                             <tr>
                                 <td>@item.TableName</td>
-                                <td>@item.SourceConnectionName</td>
-                                <td>@item.TargetConnectionName</td>
+                                
+                                <td>
+                                    <div class="text-truncate" style="max-width: 50px;" title="@item.SourceConnectionName">
+                                        @item.SourceConnectionName
+                                    </div>
+                                </td>
+
+                                <td>
+                                    <div class="text-truncate" style="max-width: 50px;" title="@item.TargetConnectionName">
+                                        @item.TargetConnectionName
+                                    </div>
+                                </td>
+
                                 <td>@item.OnlineRetentionMonths</td>
                                 <td>@item.HistoryRetentionMonths</td>
                                 <td>@item.BatchSize</td>

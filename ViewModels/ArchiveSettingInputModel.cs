@@ -12,12 +12,12 @@ public class ArchiveSettingInputModel
 
     /// <summary>來源資料庫的連線名稱或完整連線字串。</summary>
     [Required]
-    [Display(Name = "來源資料庫的連線名稱或連線字串")]
+    [Display(Name = "來源資料庫的連線字串")]
     public string SourceConnectionName { get; set; } = string.Empty;
 
     /// <summary>目標資料庫的連線名稱或完整連線字串。</summary>
     [Required]
-    [Display(Name = "目標資料庫的連線名稱或連線字串")]
+    [Display(Name = "目標資料庫的連線字串")]
     public string TargetConnectionName { get; set; } = string.Empty;
 
     /// <summary>搬移的資料表名稱。</summary>
@@ -35,19 +35,19 @@ public class ArchiveSettingInputModel
     [Display(Name = "主鍵欄位名稱")]
     public string PrimaryKeyColumn { get; set; } = string.Empty;
 
-    /// <summary>線上保留月份。</summary>
+    /// <summary>線上資料保留月份。</summary>
     [Range(1, 120)]
-    [Display(Name = "線上保留月份")]
+    [Display(Name = "線上資料保留月份")]
     public int OnlineRetentionMonths { get; set; } = 3;
 
-    /// <summary>歷史保留月份。</summary>
+    /// <summary>歷史資料保留月份。</summary>
     [Range(1, 120)]
-    [Display(Name = "歷史保留月份")]
+    [Display(Name = "歷史資料保留月份")]
     public int HistoryRetentionMonths { get; set; } = 6;
 
     /// <summary>每批處理筆數。</summary>
     [Range(1, int.MaxValue)]
-    [Display(Name = "每批處理筆數")]
+    [Display(Name = "每批處理筆數(不得超過4000)")]
     public int BatchSize { get; set; } = 2000;
 
     /// <summary>是否啟用 CSV 匯出。</summary>
