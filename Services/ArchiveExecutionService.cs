@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Linq;
 using Dapper;
 using DataLifecycleManager.Configuration;
 using DataLifecycleManager.Infrastructure;
@@ -47,32 +48,58 @@ public class ArchiveExecutionService
     public async Task<MigrationResult> RunOnceAsync(CancellationToken cancellationToken)
     {
         var messages = new List<string>();
-        var settings = await _settingRepository.GetAllAsync(cancellationToken);
 
-        foreach (var setting in settings)
+        try
         {
-            var cutoffOnline = DateTime.Now.AddMonths(-setting.OnlineRetentionMonths);
-            var cutoffHistory = DateTime.Now.AddMonths(-setting.HistoryRetentionMonths);
+            var settings = await _settingRepository.GetAllAsync(cancellationToken);
+            var enabledSettings = settings.Where(s => s.Enabled).ToList();
 
-            _logger.LogInformation("準備搬移 {Table}，線上截止 {OnlineCutoff:yyyy-MM-dd}，歷史截止 {HistoryCutoff:yyyy-MM-dd}", setting.TableName, cutoffOnline, cutoffHistory);
-
-            await _retryPolicyExecutor.ExecuteAsync(
-                $"{setting.TableName}-Archive",
-                () => ArchiveOnlineAsync(setting, cutoffOnline, cancellationToken),
-                cancellationToken);
-
-            if (setting.CsvEnabled)
+            if (!enabledSettings.Any())
             {
-                await _retryPolicyExecutor.ExecuteAsync(
-                    $"{setting.TableName}-Csv",
-                    () => ExportHistoryAsync(setting, cutoffHistory, cancellationToken),
-                    cancellationToken);
+                messages.Add("沒有啟用的搬移設定，未執行搬移流程。");
+                return new MigrationResult(true, messages);
             }
 
-            messages.Add($"{setting.TableName} 搬移完畢（線上>{cutoffOnline:yyyy-MM-dd}；歷史>{cutoffHistory:yyyy-MM-dd}）");
-        }
+            foreach (var setting in enabledSettings)
+            {
+                var cutoffOnline = DateTime.Now.AddMonths(-setting.OnlineRetentionMonths);
+                var cutoffHistory = DateTime.Now.AddMonths(-setting.HistoryRetentionMonths);
 
-        return new MigrationResult(true, messages);
+                _logger.LogInformation("準備搬移 {Table}，線上截止 {OnlineCutoff:yyyy-MM-dd}，歷史截止 {HistoryCutoff:yyyy-MM-dd}", setting.TableName, cutoffOnline, cutoffHistory);
+
+                try
+                {
+                    await _retryPolicyExecutor.ExecuteAsync(
+                        $"{setting.TableName}-Archive",
+                        () => ArchiveOnlineAsync(setting, cutoffOnline, cancellationToken),
+                        cancellationToken);
+
+                    if (setting.CsvEnabled)
+                    {
+                        await _retryPolicyExecutor.ExecuteAsync(
+                            $"{setting.TableName}-Csv",
+                            () => ExportHistoryAsync(setting, cutoffHistory, cancellationToken),
+                            cancellationToken);
+                    }
+
+                    messages.Add($"{setting.TableName} 搬移完畢（線上>{cutoffOnline:yyyy-MM-dd}；歷史>{cutoffHistory:yyyy-MM-dd}）");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "搬移 {Table} 時發生錯誤", setting.TableName);
+                    messages.Add($"[{setting.TableName}] 發生錯誤：{ex.GetBaseException().Message}");
+                    return new MigrationResult(false, messages);
+                }
+            }
+
+            return new MigrationResult(true, messages);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "搬移流程發生未處理例外");
+            messages.Add($"搬移流程失敗：{ex.GetBaseException().Message}");
+            return new MigrationResult(false, messages);
+        }
     }
 
     /// <summary>

@@ -15,12 +15,12 @@
 
                     <div class="col-md-6">
                         <label asp-for="Form.SourceConnectionName" class="form-label"></label>
-                        <input asp-for="Form.SourceConnectionName" class="form-control" />
+                        <input asp-for="Form.SourceConnectionName" class="form-control" placeholder="可輸入名稱或完整連線字串" />
                         <span asp-validation-for="Form.SourceConnectionName" class="text-danger"></span>
                     </div>
                     <div class="col-md-6">
                         <label asp-for="Form.TargetConnectionName" class="form-label"></label>
-                        <input asp-for="Form.TargetConnectionName" class="form-control" />
+                        <input asp-for="Form.TargetConnectionName" class="form-control" placeholder="可輸入名稱或完整連線字串" />
                         <span asp-validation-for="Form.TargetConnectionName" class="text-danger"></span>
                     </div>
 
@@ -69,6 +69,13 @@
                         </div>
                     </div>
 
+                    <div class="col-12">
+                        <div class="form-check form-switch">
+                            <input asp-for="Form.Enabled" class="form-check-input" />
+                            <label asp-for="Form.Enabled" class="form-check-label"></label>
+                        </div>
+                    </div>
+
                     <div class="col-12 d-flex justify-content-end gap-2">
                         <button type="submit" class="btn btn-primary">儲存設定</button>
                     </div>
@@ -83,6 +90,10 @@
                 {
                     <div class="alert alert-success" role="alert">@success</div>
                 }
+                @if (TempData["Error"] is string error)
+                {
+                    <div class="alert alert-danger" role="alert">@error</div>
+                }
 
                 <div class="table-responsive">
                     <table class="table table-striped align-middle">
@@ -95,6 +106,8 @@
                             <th>歷史保留(月)</th>
                             <th>Batch</th>
                             <th>CSV</th>
+                            <th>啟用</th>
+                            <th class="text-end">操作</th>
                         </tr>
                         </thead>
                         <tbody>
@@ -108,6 +121,17 @@
                                 <td>@item.HistoryRetentionMonths</td>
                                 <td>@item.BatchSize</td>
                                 <td>@(item.CsvEnabled ? "是" : "否")</td>
+                                <td>@(item.Enabled ? "是" : "否")</td>
+                                <td class="text-end">
+                                    <div class="d-flex justify-content-end gap-2">
+                                        <a class="btn btn-sm btn-outline-primary" asp-action="Edit" asp-route-id="@item.Id">編輯</a>
+                                        <form asp-action="Delete" method="post" onsubmit="return confirm('確定要刪除這筆設定嗎？');">
+                                            @Html.AntiForgeryToken()
+                                            <input type="hidden" name="id" value="@item.Id" />
+                                            <button type="submit" class="btn btn-sm btn-outline-danger">刪除</button>
+                                        </form>
+                                    </div>
+                                </td>
                             </tr>
                         }
                         </tbody>

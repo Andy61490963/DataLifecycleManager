@@ -34,13 +34,25 @@ public class ArchiveSettingsController : Controller
     [HttpGet]
     public async Task<IActionResult> Index(CancellationToken cancellationToken)
     {
-        var existing = await _repository.GetAllAsync(cancellationToken);
-        var vm = new ArchiveSettingsPageViewModel
-        {
-            ExistingSettings = existing
-        };
-
+        var vm = await BuildPageViewModelAsync(null, cancellationToken);
         return View(vm);
+    }
+
+    /// <summary>
+    /// 讀取單筆設定並帶入編輯表單。
+    /// </summary>
+    [HttpGet]
+    public async Task<IActionResult> Edit(int id, CancellationToken cancellationToken)
+    {
+        var target = await _repository.GetByIdAsync(id, cancellationToken);
+        if (target is null)
+        {
+            TempData["Error"] = "找不到指定的設定";
+            return RedirectToAction(nameof(Index));
+        }
+
+        var vm = await BuildPageViewModelAsync(target, cancellationToken);
+        return View("Index", vm);
     }
 
     /// <summary>
@@ -69,12 +81,21 @@ public class ArchiveSettingsController : Controller
             HistoryRetentionMonths = form.HistoryRetentionMonths,
             BatchSize = form.BatchSize,
             CsvEnabled = form.CsvEnabled,
-            CsvRootFolder = form.CsvRootFolder.Trim()
+            CsvRootFolder = form.CsvRootFolder.Trim(),
+            Enabled = form.Enabled
         };
 
-        await _repository.UpsertAsync(entity, cancellationToken);
-        TempData["Success"] = $"{entity.TableName} 設定已儲存";
-        _logger.LogInformation("使用者儲存設定：{Table}", entity.TableName);
+        try
+        {
+            await _repository.UpsertAsync(entity, cancellationToken);
+            TempData["Success"] = $"{entity.TableName} 設定已儲存";
+            _logger.LogInformation("使用者儲存設定：{Table}", entity.TableName);
+        }
+        catch (Exception ex)
+        {
+            TempData["Error"] = $"儲存設定失敗：{ex.GetBaseException().Message}";
+            _logger.LogError(ex, "儲存設定失敗 {Table}", entity.TableName);
+        }
 
         return RedirectToAction(nameof(Index));
     }
@@ -86,16 +107,85 @@ public class ArchiveSettingsController : Controller
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Run(CancellationToken cancellationToken)
     {
-        var result = await _executionService.RunOnceAsync(cancellationToken);
+        try
+        {
+            var result = await _executionService.RunOnceAsync(cancellationToken);
+            var existing = await _repository.GetAllAsync(cancellationToken);
+
+            var vm = new ArchiveSettingsPageViewModel
+            {
+                ExistingSettings = existing,
+                ExecutionMessages = result.Messages,
+                ExecutionSucceeded = result.Succeeded
+            };
+
+            return View("Index", vm);
+        }
+        catch (Exception ex)
+        {
+            var existing = await _repository.GetAllAsync(cancellationToken);
+            var vm = new ArchiveSettingsPageViewModel
+            {
+                ExistingSettings = existing,
+                ExecutionMessages = new[] { $"執行失敗：{ex.GetBaseException().Message}" },
+                ExecutionSucceeded = false
+            };
+
+            _logger.LogError(ex, "手動執行搬移時發生未處理例外");
+            return View("Index", vm);
+        }
+    }
+
+    /// <summary>
+    /// 刪除指定設定並返回列表。
+    /// </summary>
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Delete(int id, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _repository.DeleteAsync(id, cancellationToken);
+            TempData["Success"] = "設定已刪除";
+        }
+        catch (Exception ex)
+        {
+            TempData["Error"] = $"刪除設定失敗：{ex.GetBaseException().Message}";
+            _logger.LogError(ex, "刪除設定失敗 {Id}", id);
+        }
+
+        return RedirectToAction(nameof(Index));
+    }
+
+    /// <summary>
+    /// 建立設定頁面 ViewModel，並可帶入正在編輯的設定以回填表單。
+    /// </summary>
+    /// <param name="editing">若為編輯模式則為目標設定，否則為 null。</param>
+    /// <param name="cancellationToken">取消權杖。</param>
+    private async Task<ArchiveSettingsPageViewModel> BuildPageViewModelAsync(ArchiveSetting? editing, CancellationToken cancellationToken)
+    {
         var existing = await _repository.GetAllAsync(cancellationToken);
 
-        var vm = new ArchiveSettingsPageViewModel
+        return new ArchiveSettingsPageViewModel
         {
             ExistingSettings = existing,
-            ExecutionMessages = result.Messages,
-            ExecutionSucceeded = result.Succeeded
+            Form = editing is null
+                ? new ArchiveSettingInputModel()
+                : new ArchiveSettingInputModel
+                {
+                    Id = editing.Id,
+                    SourceConnectionName = editing.SourceConnectionName,
+                    TargetConnectionName = editing.TargetConnectionName,
+                    TableName = editing.TableName,
+                    DateColumn = editing.DateColumn,
+                    PrimaryKeyColumn = editing.PrimaryKeyColumn,
+                    OnlineRetentionMonths = editing.OnlineRetentionMonths,
+                    HistoryRetentionMonths = editing.HistoryRetentionMonths,
+                    BatchSize = editing.BatchSize,
+                    CsvEnabled = editing.CsvEnabled,
+                    CsvRootFolder = editing.CsvRootFolder,
+                    Enabled = editing.Enabled
+                }
         };
-
-        return View("Index", vm);
     }
 }

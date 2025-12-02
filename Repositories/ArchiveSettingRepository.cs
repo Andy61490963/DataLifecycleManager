@@ -24,13 +24,25 @@ public class ArchiveSettingRepository : IArchiveSettingRepository
     /// <inheritdoc />
     public async Task<IReadOnlyList<ArchiveSetting>> GetAllAsync(CancellationToken cancellationToken)
     {
-        const string sql = "SELECT Id, SourceConnectionName, TargetConnectionName, TableName, DateColumn, PrimaryKeyColumn, OnlineRetentionMonths, HistoryRetentionMonths, BatchSize, CsvEnabled, CsvRootFolder FROM dbo.ArchiveSettings ORDER BY TableName";
+        const string sql = "SELECT Id, SourceConnectionName, TargetConnectionName, TableName, DateColumn, PrimaryKeyColumn, OnlineRetentionMonths, HistoryRetentionMonths, BatchSize, CsvEnabled, CsvRootFolder, Enabled FROM dbo.ArchiveSettings ORDER BY TableName";
 
         await using var connection = _connectionFactory.CreateConnection(ConfigurationConnectionName);
         await connection.OpenAsync(cancellationToken);
 
         var result = await connection.QueryAsync<ArchiveSetting>(new CommandDefinition(sql, cancellationToken: cancellationToken));
         return result.ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task<ArchiveSetting?> GetByIdAsync(int id, CancellationToken cancellationToken)
+    {
+        const string sql = "SELECT Id, SourceConnectionName, TargetConnectionName, TableName, DateColumn, PrimaryKeyColumn, OnlineRetentionMonths, HistoryRetentionMonths, BatchSize, CsvEnabled, CsvRootFolder, Enabled FROM dbo.ArchiveSettings WHERE Id = @Id";
+
+        await using var connection = _connectionFactory.CreateConnection(ConfigurationConnectionName);
+        await connection.OpenAsync(cancellationToken);
+
+        var command = new CommandDefinition(sql, new { Id = id }, cancellationToken: cancellationToken);
+        return await connection.QuerySingleOrDefaultAsync<ArchiveSetting>(command);
     }
 
     /// <inheritdoc />
@@ -47,7 +59,8 @@ public class ArchiveSettingRepository : IArchiveSettingRepository
                 HistoryRetentionMonths,
                 BatchSize,
                 CsvEnabled,
-                CsvRootFolder)
+                CsvRootFolder,
+                Enabled)
             VALUES (
                 @SourceConnectionName,
                 @TargetConnectionName,
@@ -58,7 +71,8 @@ public class ArchiveSettingRepository : IArchiveSettingRepository
                 @HistoryRetentionMonths,
                 @BatchSize,
                 @CsvEnabled,
-                @CsvRootFolder);
+                @CsvRootFolder,
+                @Enabled);
             SELECT CAST(SCOPE_IDENTITY() AS INT);
             """;
 
@@ -73,7 +87,8 @@ public class ArchiveSettingRepository : IArchiveSettingRepository
                 HistoryRetentionMonths  = @HistoryRetentionMonths,
                 BatchSize               = @BatchSize,
                 CsvEnabled              = @CsvEnabled,
-                CsvRootFolder           = @CsvRootFolder
+                CsvRootFolder           = @CsvRootFolder,
+                Enabled                 = @Enabled
             WHERE Id = @Id;
             SELECT @Id;
             """;
@@ -86,5 +101,17 @@ public class ArchiveSettingRepository : IArchiveSettingRepository
         var command = new CommandDefinition(sql, setting, cancellationToken: cancellationToken);
         var id = await connection.ExecuteScalarAsync<int>(command);
         return id;
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteAsync(int id, CancellationToken cancellationToken)
+    {
+        const string sql = "DELETE FROM dbo.ArchiveSettings WHERE Id = @Id";
+
+        await using var connection = _connectionFactory.CreateConnection(ConfigurationConnectionName);
+        await connection.OpenAsync(cancellationToken);
+
+        var command = new CommandDefinition(sql, new { Id = id }, cancellationToken: cancellationToken);
+        await connection.ExecuteAsync(command);
     }
 }

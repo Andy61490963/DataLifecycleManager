@@ -23,15 +23,19 @@ public class SqlConnectionFactory
     /// <summary>
     /// 建立新的資料庫連線。
     /// </summary>
-    /// <param name="connectionName">連線字串名稱。</param>
+    /// <param name="connectionNameOrString">連線名稱或完整連線字串。</param>
     /// <returns>尚未開啟的連線物件。</returns>
-    public SqlConnection CreateConnection(string connectionName)
+    public SqlConnection CreateConnection(string connectionNameOrString)
     {
-        var connectionString = _configuration.GetConnectionString(connectionName);
-        if (string.IsNullOrWhiteSpace(connectionString))
+        if (string.IsNullOrWhiteSpace(connectionNameOrString))
         {
-            throw new InvalidOperationException($"Connection string '{connectionName}' 未設定。");
+            throw new InvalidOperationException("連線名稱或連線字串不可為空白。");
         }
+
+        var configured = _configuration.GetConnectionString(connectionNameOrString);
+        var connectionString = string.IsNullOrWhiteSpace(configured)
+            ? connectionNameOrString
+            : configured;
 
         return new SqlConnection(connectionString);
     }

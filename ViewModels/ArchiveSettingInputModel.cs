@@ -10,14 +10,14 @@ public class ArchiveSettingInputModel
     /// <summary>設定編號（新增時可為 null）。</summary>
     public int? Id { get; set; }
 
-    /// <summary>來源資料庫的連線名稱。</summary>
+    /// <summary>來源資料庫的連線名稱或完整連線字串。</summary>
     [Required]
-    [Display(Name = "來源資料庫的連線字串")]
+    [Display(Name = "來源資料庫的連線名稱或連線字串")]
     public string SourceConnectionName { get; set; } = string.Empty;
 
-    /// <summary>目標資料庫的連線名稱。</summary>
+    /// <summary>目標資料庫的連線名稱或完整連線字串。</summary>
     [Required]
-    [Display(Name = "目標資料庫的連線字串")]
+    [Display(Name = "目標資料庫的連線名稱或連線字串")]
     public string TargetConnectionName { get; set; } = string.Empty;
 
     /// <summary>搬移的資料表名稱。</summary>
@@ -58,4 +58,8 @@ public class ArchiveSettingInputModel
     [Required]
     [Display(Name = "CSV 根目錄")]
     public string CsvRootFolder { get; set; } = string.Empty;
+
+    /// <summary>是否啟用此搬移設定。</summary>
+    [Display(Name = "是否啟用此設定")]
+    public bool Enabled { get; set; } = true;
 }
