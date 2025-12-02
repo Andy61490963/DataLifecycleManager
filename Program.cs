@@ -17,23 +17,53 @@ public class Program
     /// <param name="args">啟動參數。</param>
     public static void Main(string[] args)
     {
+        // 先建一個 bootstrap logger，讓 Program 啟動階段也有 log
         Log.Logger = SerilogConfigurator.CreateBootstrapLogger();
 
-        var builder = Host.CreateApplicationBuilder(args);
-        builder.Services.Configure<ArchiveSettings>(builder.Configuration.GetSection("ArchiveSettings"));
-        builder.Services.Configure<AppLoggingOptions>(builder.Configuration.GetSection("Logging"));
-        builder.Services.AddSingleton<SqlConnectionFactory>();
-        builder.Services.AddSingleton<RetryPolicyExecutor>();
-        builder.Services.AddSingleton<ArchiveCoordinator>();
-        builder.Services.AddHostedService<Worker>();
-
-        builder.Host.UseSerilog((context, services, loggerConfiguration) =>
+        try
         {
-            var loggingOptions = context.Configuration.GetSection("Logging").Get<AppLoggingOptions>() ?? new AppLoggingOptions();
-            SerilogConfigurator.Configure(loggerConfiguration, loggingOptions);
-        });
-
-        var host = builder.Build();
-        host.Run();
+            CreateHostBuilder(args).Build().Run();
+        }
+        catch (Exception ex)
+        {
+            // 啟動階段或 Host.Run 期間如果炸掉，這邊會記錄
+            Log.Fatal(ex, "Application terminated unexpectedly");
+        }
+        finally
+        {
+            // 確保 buffer 裡的 log 都寫完
+            Log.CloseAndFlush();
+        }
     }
+
+    /// <summary>
+    /// 建立 IHostBuilder 並註冊服務與 Serilog。
+    /// </summary>
+    /// <param name="args">啟動參數。</param>
+    /// <returns>IHostBuilder 實例。</returns>
+    public static IHostBuilder CreateHostBuilder(string[] args) =>
+        Host.CreateDefaultBuilder(args)
+            // 這裡就可以用 UseSerilog，因為現在是 IHostBuilder
+            .UseSerilog((context, services, loggerConfiguration) =>
+            {
+                var loggingOptions = context.Configuration
+                    .GetSection("Logging")
+                    .Get<AppLoggingOptions>() ?? new AppLoggingOptions();
+
+                SerilogConfigurator.Configure(loggerConfiguration, loggingOptions);
+            })
+            .ConfigureServices((context, services) =>
+            {
+                // 把原本 builder.Services.xxx 的東西搬到這裡
+                services.Configure<ArchiveSettings>(
+                    context.Configuration.GetSection("ArchiveSettings"));
+
+                services.Configure<AppLoggingOptions>(
+                    context.Configuration.GetSection("Logging"));
+
+                services.AddSingleton<SqlConnectionFactory>();
+                services.AddSingleton<RetryPolicyExecutor>();
+                services.AddSingleton<ArchiveCoordinator>();
+                services.AddHostedService<Worker>();
+            });
 }

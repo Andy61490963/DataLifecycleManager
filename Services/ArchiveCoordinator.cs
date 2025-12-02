@@ -1,5 +1,6 @@
 using System.Dynamic;
 using System.Globalization;
+using System.Text;
 using System.Transactions;
 using Dapper;
 using DataLifecycleManager.Configuration;
@@ -46,9 +47,13 @@ public class ArchiveCoordinator
             return;
         }
 
+        // 遍立 設定檔的資料表
         foreach (var table in _settings.Tables)
         {
+            // 取得運行參數
             var effective = BuildEffectiveTableSettings(table);
+            
+            // 基於重試器上，執行功能
             await _retryExecutor.ExecuteAsync($"{table.Name}-Archive", () => ArchiveOnlineAsync(effective, cancellationToken), cancellationToken);
 
             if (_settings.Csv.Enabled && effective.CsvEnabled)
@@ -65,12 +70,16 @@ public class ArchiveCoordinator
     /// <param name="cancellationToken">取消權杖。</param>
     private async Task ArchiveOnlineAsync(EffectiveTableSettings table, CancellationToken cancellationToken)
     {
-        var cutoff = DateTime.UtcNow.AddMonths(-table.OnlineRetentionMonths);
+        // 以月為層級，產生斷點
+        var cutoff = DateTime.Now.AddMonths(-table.OnlineRetentionMonths);
         _logger.LogInformation("開始搬移 {Table}，截止日 {Cutoff:yyyy-MM-dd}，批次 {BatchSize}", table.Name, cutoff, table.BatchSize);
 
+        // 如果使用者沒有手動取消
         while (!cancellationToken.IsCancellationRequested)
         {
             var rows = await FetchBatchAsync(table.SourceConnectionName, table.Name, table.DateColumn, cutoff, table.BatchSize, cancellationToken);
+            
+            // 根據 BatchSize 一直切片，直到都取完為止
             if (!rows.Any())
             {
                 break;
@@ -87,7 +96,7 @@ public class ArchiveCoordinator
     /// <param name="cancellationToken">取消權杖。</param>
     private async Task ExportHistoryAsync(EffectiveTableSettings table, CancellationToken cancellationToken)
     {
-        var cutoff = DateTime.UtcNow.AddMonths(-table.HistoryRetentionMonths);
+        var cutoff = DateTime.Now.AddMonths(-table.HistoryRetentionMonths);
         _logger.LogInformation("開始 CSV 匯出 {Table}，截止日 {Cutoff:yyyy-MM-dd}，批次 {BatchSize}", table.Name, cutoff, table.BatchSize);
 
         while (!cancellationToken.IsCancellationRequested)
@@ -133,14 +142,31 @@ public class ArchiveCoordinator
     /// <param name="cutoff">截止時間。</param>
     /// <param name="batchSize">批次大小。</param>
     /// <param name="cancellationToken">取消權杖。</param>
-    private async Task<IReadOnlyList<dynamic>> FetchBatchAsync(string connectionName, string tableName, string dateColumn, DateTime cutoff, int batchSize, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<IDictionary<string, object?>>> FetchBatchAsync(
+        string connectionName,
+        string tableName,
+        string dateColumn,
+        DateTime cutoff,
+        int batchSize,
+        CancellationToken cancellationToken)
     {
-        var sql = $"SELECT TOP (@BatchSize) * FROM {Bracket(tableName)} WITH (READPAST) WHERE {Bracket(dateColumn)} < @Cutoff ORDER BY {Bracket(dateColumn)} ASC";
+        var sql = $"""
+                   SELECT TOP (@BatchSize) *
+                   FROM {Bracket(tableName)} WITH (READPAST)
+                   WHERE {Bracket(dateColumn)} < @Cutoff
+                   ORDER BY {Bracket(dateColumn)} ASC;
+                   """;
+        
         await using var connection = _connectionFactory.CreateConnection(connectionName);
         await connection.OpenAsync(cancellationToken);
 
+        // Dapper 預設會回傳 dynamic Row
         var rows = await connection.QueryAsync(sql, new { BatchSize = batchSize, Cutoff = cutoff });
-        return rows.ToList();
+
+        // 型別投影，以 IDictionary 介面操作 key = 欄位名稱, value = 欄位內容
+        return rows
+            .Select(r => (IDictionary<string, object?>)r)
+            .ToList();
     }
 
     /// <summary>
@@ -149,27 +175,72 @@ public class ArchiveCoordinator
     /// <param name="table">合併後的設定。</param>
     /// <param name="rows">待搬移資料。</param>
     /// <param name="cancellationToken">取消權杖。</param>
-    private async Task MoveBatchAsync(EffectiveTableSettings table, IReadOnlyList<dynamic> rows, CancellationToken cancellationToken)
+    /// <summary>
+    /// 使用 TransactionScope 將單批資料搬移至目標庫並刪除來源。
+    /// </summary>
+    private async Task MoveBatchAsync(
+        EffectiveTableSettings table,
+        IReadOnlyList<IDictionary<string, object?>> rows,
+        CancellationToken cancellationToken)
     {
-        var columns = DynamicSqlHelper.GetColumnNames(rows.First());
+        if (rows.Count == 0)
+        {
+            _logger.LogInformation("{Table} 無資料可搬移。", table.Name);
+            return;
+        }
+
+        // 1. 從第一筆資料的 key 當欄位清單
+        var columns = rows[0].Keys.ToList();
+
+        // 2. 組 Insert / Delete SQL
         var insertSql = DynamicSqlHelper.BuildInsertSql(table.Name, columns, table.PrimaryKeyColumn);
         var deleteSql = DynamicSqlHelper.BuildDeleteSql(table.Name, table.PrimaryKeyColumn);
-        var primaryKeys = rows.Select(r => ((IDictionary<string, object>)r)[table.PrimaryKeyColumn]).ToList();
 
-        using var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
+        // 3. 主鍵集合
+        var primaryKeys = rows
+            .Select(row =>
+            {
+                if (!row.TryGetValue(table.PrimaryKeyColumn, out var key))
+                {
+                    throw new InvalidOperationException(
+                        $"搬移 {table.Name} 時找不到主鍵欄位 {table.PrimaryKeyColumn}。");
+                }
+                return key;
+            })
+            .ToList();
+        
+        // 1. 先寫入歷史庫（DB2）
+        await using (var target = _connectionFactory.CreateConnection(table.TargetConnectionName))
+        {
+            await target.OpenAsync(cancellationToken);
 
-        await using var target = _connectionFactory.CreateConnection(table.TargetConnectionName);
-        await target.OpenAsync(cancellationToken);
-        await target.ExecuteAsync(insertSql, rows);
+            var parameterBag = rows.Select(row =>
+            {
+                var dp = new DynamicParameters();
 
-        await using var source = _connectionFactory.CreateConnection(table.SourceConnectionName);
-        await source.OpenAsync(cancellationToken);
-        await source.ExecuteAsync(deleteSql, new { Ids = primaryKeys });
+                foreach (var (columnName, value) in row)
+                {
+                    dp.Add(columnName, value);
+                }
 
-        scope.Complete();
+                return (object)dp; // 讓外層變成 IEnumerable<object>
+            });
+
+            await target.ExecuteAsync(insertSql, parameterBag);
+        }
+
+        // 2. 再刪除線上庫（DB1）
+        await using (var source = _connectionFactory.CreateConnection(table.SourceConnectionName))
+        {
+            await source.OpenAsync(cancellationToken);
+
+            // 這裡的 List<object?> 給 IN @Ids 用，是 Dapper 支援的 pattern
+            await source.ExecuteAsync(deleteSql, new { Ids = primaryKeys });
+        }
+        
         _logger.LogInformation("{Table} 搬移 {Count} 筆完成。", table.Name, rows.Count);
     }
-
+    
     /// <summary>
     /// 以主鍵批次刪除指定資料。
     /// </summary>
@@ -178,16 +249,37 @@ public class ArchiveCoordinator
     /// <param name="primaryKeyColumn">主鍵欄位。</param>
     /// <param name="rows">目標資料列。</param>
     /// <param name="cancellationToken">取消權杖。</param>
-    private async Task DeleteBatchAsync(string connectionName, string tableName, string primaryKeyColumn, IReadOnlyList<dynamic> rows, CancellationToken cancellationToken)
+    /// <summary>
+    /// 以主鍵批次刪除指定資料。
+    /// </summary>
+    private async Task DeleteBatchAsync(
+        string connectionName,
+        string tableName,
+        string primaryKeyColumn,
+        IReadOnlyList<IDictionary<string, object?>> rows,
+        CancellationToken cancellationToken)
     {
         var deleteSql = DynamicSqlHelper.BuildDeleteSql(tableName, primaryKeyColumn);
-        var primaryKeys = rows.Select(r => ((IDictionary<string, object>)r)[primaryKeyColumn]).ToList();
+
+        var primaryKeys = rows
+            .Select(row =>
+            {
+                if (!row.TryGetValue(primaryKeyColumn, out var key))
+                {
+                    throw new InvalidOperationException(
+                        $"刪除 {tableName} 時找不到主鍵欄位 {primaryKeyColumn}。");
+                }
+                return key;
+            })
+            .ToList();
 
         await using var connection = _connectionFactory.CreateConnection(connectionName);
         await connection.OpenAsync(cancellationToken);
         await connection.ExecuteAsync(deleteSql, new { Ids = primaryKeys });
+
         _logger.LogInformation("{Table} 刪除 {Count} 筆歷史資料。", tableName, rows.Count);
     }
+
 
     /// <summary>
     /// 將批次資料依分段規則輸出為 CSV 檔案。
@@ -197,36 +289,77 @@ public class ArchiveCoordinator
     /// <param name="fromDate">批次最早日期。</param>
     /// <param name="toDate">批次最晚日期。</param>
     /// <param name="cancellationToken">取消權杖。</param>
-    private async Task WriteCsvFilesAsync(IReadOnlyList<dynamic> rows, EffectiveTableSettings table, DateTime fromDate, DateTime toDate, CancellationToken cancellationToken)
+    /// <summary>
+    /// 將批次資料依分段規則輸出為 CSV 檔案。
+    /// </summary>
+    private async Task WriteCsvFilesAsync(
+        IReadOnlyList<IDictionary<string, object?>> rows,
+        EffectiveTableSettings table,
+        DateTime fromDate,
+        DateTime toDate,
+        CancellationToken cancellationToken)
     {
-        var columns = DynamicSqlHelper.GetColumnNames(rows.First());
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        var columns   = rows[0].Keys.ToList();
         var delimiter = _settings.Csv.Delimiter;
-        var chunks = ChunkRows(rows, _settings.Csv.MaxRowsPerFile).ToList();
+        var chunks    = ChunkRows(rows, _settings.Csv.MaxRowsPerFile).ToList();
 
         Directory.CreateDirectory(ResolveCsvDirectory(table.Name, toDate));
+
         for (var i = 0; i < chunks.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
             var filePath = ResolveCsvPath(table.Name, fromDate, toDate, i + 1);
-            await using var writer = new StreamWriter(filePath, append: false, encoding: new UTF8Encoding(false));
+            await using var writer = new StreamWriter(filePath, append: false, encoding: new UTF8Encoding(true));
+
+            // header
             await writer.WriteLineAsync(string.Join(delimiter, columns));
 
+            // rows
             foreach (var row in chunks[i])
             {
-                var values = columns.Select(column => EscapeCsv(((IDictionary<string, object?>)row)[column], delimiter));
+                var values = columns.Select(column =>
+                {
+                    row.TryGetValue(column, out var value);
+                    return EscapeCsv(value, delimiter);
+                });
+
                 await writer.WriteLineAsync(string.Join(delimiter, values));
             }
         }
     }
+
 
     /// <summary>
     /// 計算批次資料的日期範圍，方便命名檔案。
     /// </summary>
     /// <param name="rows">資料列。</param>
     /// <param name="dateColumn">日期欄位。</param>
-    private (DateTime FromDate, DateTime ToDate) CalculateRange(IReadOnlyList<dynamic> rows, string dateColumn)
+    /// <summary>
+    /// 計算批次資料的日期範圍，方便命名檔案。
+    /// </summary>
+    private (DateTime FromDate, DateTime ToDate) CalculateRange(
+        IReadOnlyList<IDictionary<string, object?>> rows,
+        string dateColumn)
     {
-        var dates = rows.Select(r => Convert.ToDateTime(((IDictionary<string, object?>)r)[dateColumn], CultureInfo.InvariantCulture)).ToList();
+        var dates = rows
+            .Select(row =>
+            {
+                if (!row.TryGetValue(dateColumn, out var value))
+                {
+                    throw new InvalidOperationException(
+                        $"無法從資料列取得日期欄位 {dateColumn}。");
+                }
+
+                return Convert.ToDateTime(value, CultureInfo.InvariantCulture);
+            })
+            .ToList();
+
         return (dates.Min(), dates.Max());
     }
 
@@ -235,7 +368,9 @@ public class ArchiveCoordinator
     /// </summary>
     /// <param name="rows">來源資料。</param>
     /// <param name="size">每塊大小。</param>
-    private IEnumerable<IReadOnlyList<dynamic>> ChunkRows(IReadOnlyList<dynamic> rows, int size)
+    private static IEnumerable<IReadOnlyList<IDictionary<string, object?>>> ChunkRows(
+        IReadOnlyList<IDictionary<string, object?>> rows,
+        int size)
     {
         for (var i = 0; i < rows.Count; i += size)
         {
