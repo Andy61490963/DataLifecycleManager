@@ -23,4 +23,9 @@
   <ItemGroup>
     <Folder Include="Logs\" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="WebAdmin/**" />
+    <None Include="WebAdmin/**" />
+  </ItemGroup>
 </Project>

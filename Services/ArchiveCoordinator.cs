@@ -1,12 +1,11 @@
 using System.Dynamic;
 using System.Globalization;
 using System.Text;
-using System.Transactions;
 using Dapper;
 using DataLifecycleManager.Configuration;
+using DataLifecycleManager.Domain;
 using DataLifecycleManager.Infrastructure;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace DataLifecycleManager.Services;
 
@@ -15,7 +14,8 @@ namespace DataLifecycleManager.Services;
 /// </summary>
 public class ArchiveCoordinator
 {
-    private readonly ArchiveSettings _settings;
+    private readonly ArchiveDefaultsOptions _defaults;
+    private readonly IArchiveSettingsProvider _settingsProvider;
     private readonly SqlConnectionFactory _connectionFactory;
     private readonly RetryPolicyExecutor _retryExecutor;
     private readonly ILogger<ArchiveCoordinator> _logger;
@@ -27,9 +27,15 @@ public class ArchiveCoordinator
     /// <param name="connectionFactory">連線工廠。</param>
     /// <param name="retryExecutor">重試封裝。</param>
     /// <param name="logger">紀錄器。</param>
-    public ArchiveCoordinator(IOptions<ArchiveSettings> options, SqlConnectionFactory connectionFactory, RetryPolicyExecutor retryExecutor, ILogger<ArchiveCoordinator> logger)
+    public ArchiveCoordinator(
+        IArchiveSettingsProvider settingsProvider,
+        Microsoft.Extensions.Options.IOptions<ArchiveDefaultsOptions> defaults,
+        SqlConnectionFactory connectionFactory,
+        RetryPolicyExecutor retryExecutor,
+        ILogger<ArchiveCoordinator> logger)
     {
-        _settings = options.Value;
+        _settingsProvider = settingsProvider;
+        _defaults = defaults.Value;
         _connectionFactory = connectionFactory;
         _retryExecutor = retryExecutor;
         _logger = logger;
@@ -41,24 +47,29 @@ public class ArchiveCoordinator
     /// <param name="cancellationToken">取消權杖。</param>
     public async Task RunOnceAsync(CancellationToken cancellationToken)
     {
-        if (!_settings.Enabled)
+        if (!_defaults.Enabled)
         {
             _logger.LogInformation("歸檔排程已停用，略過本次執行。");
             return;
         }
 
-        // 遍立 設定檔的資料表
-        foreach (var table in _settings.Tables)
-        {
-            // 取得運行參數
-            var effective = BuildEffectiveTableSettings(table);
-            
-            // 基於重試器上，執行功能
-            await _retryExecutor.ExecuteAsync($"{table.Name}-Archive", () => ArchiveOnlineAsync(effective, cancellationToken), cancellationToken);
+        var tables = await _settingsProvider.GetJobsAsync(cancellationToken);
 
-            if (_settings.Csv.Enabled && effective.CsvEnabled)
+        foreach (var table in tables)
+        {
+            await _retryExecutor.ExecuteAsync(
+                $"{table.TableName}-Archive",
+                table.RetryPolicy,
+                () => ArchiveOnlineAsync(table, cancellationToken),
+                cancellationToken);
+
+            if (table.CsvEnabled && _defaults.Csv.Enabled)
             {
-                await _retryExecutor.ExecuteAsync($"{table.Name}-Csv", () => ExportHistoryAsync(effective, cancellationToken), cancellationToken);
+                await _retryExecutor.ExecuteAsync(
+                    $"{table.TableName}-Csv",
+                    table.RetryPolicy,
+                    () => ExportHistoryAsync(table, cancellationToken),
+                    cancellationToken);
             }
         }
     }
@@ -68,17 +79,17 @@ public class ArchiveCoordinator
     /// </summary>
     /// <param name="table">合併後的表設定。</param>
     /// <param name="cancellationToken">取消權杖。</param>
-    private async Task ArchiveOnlineAsync(EffectiveTableSettings table, CancellationToken cancellationToken)
+    private async Task ArchiveOnlineAsync(ArchiveJobRuntimeSettings table, CancellationToken cancellationToken)
     {
         // 以月為層級，產生斷點
         var cutoff = DateTime.Now.AddMonths(-table.OnlineRetentionMonths);
-        _logger.LogInformation("開始搬移 {Table}，截止日 {Cutoff:yyyy-MM-dd}，批次 {BatchSize}", table.Name, cutoff, table.BatchSize);
+        _logger.LogInformation("開始搬移 {Table}，截止日 {Cutoff:yyyy-MM-dd}，批次 {BatchSize}", table.TableName, cutoff, table.BatchSize);
 
         // 如果使用者沒有手動取消
         while (!cancellationToken.IsCancellationRequested)
         {
-            var rows = await FetchBatchAsync(table.SourceConnectionName, table.Name, table.DateColumn, cutoff, table.BatchSize, cancellationToken);
-            
+            var rows = await FetchBatchAsync(table.SourceConnection, table.TableName, table.DateColumn, cutoff, table.BatchSize, cancellationToken);
+
             // 根據 BatchSize 一直切片，直到都取完為止
             if (!rows.Any())
             {
@@ -94,14 +105,14 @@ public class ArchiveCoordinator
     /// </summary>
     /// <param name="table">合併後的表設定。</param>
     /// <param name="cancellationToken">取消權杖。</param>
-    private async Task ExportHistoryAsync(EffectiveTableSettings table, CancellationToken cancellationToken)
+    private async Task ExportHistoryAsync(ArchiveJobRuntimeSettings table, CancellationToken cancellationToken)
     {
         var cutoff = DateTime.Now.AddMonths(-table.HistoryRetentionMonths);
-        _logger.LogInformation("開始 CSV 匯出 {Table}，截止日 {Cutoff:yyyy-MM-dd}，批次 {BatchSize}", table.Name, cutoff, table.BatchSize);
+        _logger.LogInformation("開始 CSV 匯出 {Table}，截止日 {Cutoff:yyyy-MM-dd}，批次 {BatchSize}", table.TableName, cutoff, table.BatchSize);
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            var rows = await FetchBatchAsync(table.TargetConnectionName, table.Name, table.DateColumn, cutoff, table.BatchSize, cancellationToken);
+            var rows = await FetchBatchAsync(table.TargetConnection, table.TableName, table.DateColumn, cutoff, table.BatchSize, cancellationToken);
             if (!rows.Any())
             {
                 break;
@@ -109,28 +120,8 @@ public class ArchiveCoordinator
 
             var (fromDate, toDate) = CalculateRange(rows, table.DateColumn);
             await WriteCsvFilesAsync(rows, table, fromDate, toDate, cancellationToken);
-            await DeleteBatchAsync(table.TargetConnectionName, table.Name, table.PrimaryKeyColumn, rows, cancellationToken);
+            await DeleteBatchAsync(table.TargetConnection, table.TableName, table.PrimaryKeyColumn, rows, cancellationToken);
         }
-    }
-
-    /// <summary>
-    /// 將全域預設值與表層設定合併，取得完整運行參數。
-    /// </summary>
-    /// <param name="table">原始表設定。</param>
-    private EffectiveTableSettings BuildEffectiveTableSettings(TableSettings table)
-    {
-        return new EffectiveTableSettings
-        {
-            Name = table.Name,
-            SourceConnectionName = table.SourceConnectionName,
-            TargetConnectionName = table.TargetConnectionName,
-            DateColumn = table.DateColumn,
-            PrimaryKeyColumn = table.PrimaryKeyColumn,
-            OnlineRetentionMonths = table.OnlineRetentionMonths ?? _settings.DefaultOnlineRetentionMonths,
-            HistoryRetentionMonths = table.HistoryRetentionMonths ?? _settings.DefaultHistoryRetentionMonths,
-            BatchSize = table.BatchSize ?? _settings.DefaultBatchSize,
-            CsvEnabled = table.CsvEnabled
-        };
     }
 
     /// <summary>
@@ -179,13 +170,13 @@ public class ArchiveCoordinator
     /// 使用 TransactionScope 將單批資料搬移至目標庫並刪除來源。
     /// </summary>
     private async Task MoveBatchAsync(
-        EffectiveTableSettings table,
+        ArchiveJobRuntimeSettings table,
         IReadOnlyList<IDictionary<string, object?>> rows,
         CancellationToken cancellationToken)
     {
         if (rows.Count == 0)
         {
-            _logger.LogInformation("{Table} 無資料可搬移。", table.Name);
+            _logger.LogInformation("{Table} 無資料可搬移。", table.TableName);
             return;
         }
 
@@ -193,8 +184,8 @@ public class ArchiveCoordinator
         var columns = rows[0].Keys.ToList();
 
         // 2. 組 Insert / Delete SQL
-        var insertSql = DynamicSqlHelper.BuildInsertSql(table.Name, columns, table.PrimaryKeyColumn);
-        var deleteSql = DynamicSqlHelper.BuildDeleteSql(table.Name, table.PrimaryKeyColumn);
+        var insertSql = DynamicSqlHelper.BuildInsertSql(table.TableName, columns, table.PrimaryKeyColumn);
+        var deleteSql = DynamicSqlHelper.BuildDeleteSql(table.TableName, table.PrimaryKeyColumn);
 
         // 3. 主鍵集合
         var primaryKeys = rows
@@ -203,14 +194,14 @@ public class ArchiveCoordinator
                 if (!row.TryGetValue(table.PrimaryKeyColumn, out var key))
                 {
                     throw new InvalidOperationException(
-                        $"搬移 {table.Name} 時找不到主鍵欄位 {table.PrimaryKeyColumn}。");
+                        $"搬移 {table.TableName} 時找不到主鍵欄位 {table.PrimaryKeyColumn}。");
                 }
                 return key;
             })
             .ToList();
-        
+
         // 1. 先寫入歷史庫（DB2）
-        await using (var target = _connectionFactory.CreateConnection(table.TargetConnectionName))
+        await using (var target = _connectionFactory.CreateConnection(table.TargetConnection))
         {
             await target.OpenAsync(cancellationToken);
 
@@ -230,7 +221,7 @@ public class ArchiveCoordinator
         }
 
         // 2. 再刪除線上庫（DB1）
-        await using (var source = _connectionFactory.CreateConnection(table.SourceConnectionName))
+        await using (var source = _connectionFactory.CreateConnection(table.SourceConnection))
         {
             await source.OpenAsync(cancellationToken);
 
@@ -238,7 +229,7 @@ public class ArchiveCoordinator
             await source.ExecuteAsync(deleteSql, new { Ids = primaryKeys });
         }
         
-        _logger.LogInformation("{Table} 搬移 {Count} 筆完成。", table.Name, rows.Count);
+        _logger.LogInformation("{Table} 搬移 {Count} 筆完成。", table.TableName, rows.Count);
     }
     
     /// <summary>
@@ -294,7 +285,7 @@ public class ArchiveCoordinator
     /// </summary>
     private async Task WriteCsvFilesAsync(
         IReadOnlyList<IDictionary<string, object?>> rows,
-        EffectiveTableSettings table,
+        ArchiveJobRuntimeSettings table,
         DateTime fromDate,
         DateTime toDate,
         CancellationToken cancellationToken)
@@ -305,16 +296,16 @@ public class ArchiveCoordinator
         }
 
         var columns   = rows[0].Keys.ToList();
-        var delimiter = _settings.Csv.Delimiter;
-        var chunks    = ChunkRows(rows, _settings.Csv.MaxRowsPerFile).ToList();
+        var delimiter = _defaults.Csv.Delimiter;
+        var chunks    = ChunkRows(rows, _defaults.Csv.MaxRowsPerFile).ToList();
 
-        Directory.CreateDirectory(ResolveCsvDirectory(table.Name, toDate));
+        Directory.CreateDirectory(ResolveCsvDirectory(table.TableName, table.CsvRootFolder, toDate));
 
         for (var i = 0; i < chunks.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var filePath = ResolveCsvPath(table.Name, fromDate, toDate, i + 1);
+            var filePath = ResolveCsvPath(table.TableName, table.CsvRootFolder, fromDate, toDate, i + 1);
             await using var writer = new StreamWriter(filePath, append: false, encoding: new UTF8Encoding(true));
 
             // header
@@ -381,9 +372,9 @@ public class ArchiveCoordinator
     /// <summary>
     /// 依照表名與年月解析 CSV 儲存目錄。
     /// </summary>
-    private string ResolveCsvDirectory(string tableName, DateTime targetDate)
+    private string ResolveCsvDirectory(string tableName, string rootFolder, DateTime targetDate)
     {
-        var folder = Path.Combine(_settings.Csv.RootFolder, tableName, targetDate.ToString("yyyyMM"));
+        var folder = Path.Combine(rootFolder, tableName, targetDate.ToString("yyyyMM"));
         Directory.CreateDirectory(folder);
         return folder;
     }
@@ -391,10 +382,10 @@ public class ArchiveCoordinator
     /// <summary>
     /// 建立符合命名規則的 CSV 完整路徑。
     /// </summary>
-    private string ResolveCsvPath(string tableName, DateTime fromDate, DateTime toDate, int partIndex)
+    private string ResolveCsvPath(string tableName, string rootFolder, DateTime fromDate, DateTime toDate, int partIndex)
     {
-        var directory = ResolveCsvDirectory(tableName, toDate);
-        var fileName = _settings.Csv.FileNameFormat
+        var directory = ResolveCsvDirectory(tableName, rootFolder, toDate);
+        var fileName = _defaults.Csv.FileNameFormat
             .Replace("{TableName}", tableName)
             .Replace("{FromDate:yyyyMMdd}", fromDate.ToString("yyyyMMdd"))
             .Replace("{ToDate:yyyyMMdd}", toDate.ToString("yyyyMMdd"))
@@ -424,18 +415,3 @@ public class ArchiveCoordinator
     private static string Bracket(string value) => $"[{value}]";
 }
 
-/// <summary>
-/// 合併預設值後的資料表設定，提供執行期使用。
-/// </summary>
-internal class EffectiveTableSettings
-{
-    public required string Name { get; init; }
-    public required string SourceConnectionName { get; init; }
-    public required string TargetConnectionName { get; init; }
-    public required string DateColumn { get; init; }
-    public required string PrimaryKeyColumn { get; init; }
-    public required int OnlineRetentionMonths { get; init; }
-    public required int HistoryRetentionMonths { get; init; }
-    public required int BatchSize { get; init; }
-    public required bool CsvEnabled { get; init; }
-}

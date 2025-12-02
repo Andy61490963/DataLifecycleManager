@@ -10,7 +10,7 @@
 5. **重試策略**：每個搬移或匯出批次都套用簡易重試策略（次數與延遲可配置），避免短暫錯誤阻塞整體流程。
 
 ## 設定重點
-- `appsettings.json` 中的 `ArchiveSettings` 提供預設批次大小、保留月數、CSV 參數以及表級覆蓋設定。
+- `appsettings.json` 透過 `ArchiveDefaults` 給出預設批次大小、保留月數、CSV 參數與重試策略，表級設定改由 DB 管理。
 - `ConnectionStrings` 指定 DB1/DB2 連線；`Logging` 控制 Serilog 最小等級、檔案/Seq sink 行為。
 
 ## 模組化設計
@@ -28,3 +28,13 @@
 ## 延伸建議
 - 若環境允許 MSDTC，可將 `TransactionScope` 調整為特定隔離層級。
 - 可在 `Tables` 中加入更多欄位過濾或排序需求，以適配不同場景。
+
+## 後續可視化設定重構
+
+若需要改為「後台 UI 可動態調整歸檔設定」的方案，請參考 `Documentation/ArchiveSystemRedesign.md`，內含：
+
+- Solution 拆分（Worker / Web Admin / Domain / Application / Infrastructure）
+- 設定落地策略（哪些留在 appsettings、哪些存 DB）、完整 SQL schema
+- MVC 後台的 ViewModel、Controller 範例與驗證規則
+- IArchiveSettingsProvider 介面與 Dapper 實作（DbArchiveSettingsProvider）、Worker 冪等批次搬移流程
+- 架構圖、流程圖、類別關聯、效能與風險分析

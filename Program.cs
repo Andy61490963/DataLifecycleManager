@@ -1,5 +1,9 @@
 using DataLifecycleManager.Configuration;
+using DataLifecycleManager.Configuration;
+using DataLifecycleManager.Domain;
 using DataLifecycleManager.Infrastructure;
+using DataLifecycleManager.Infrastructure.Providers;
+using DataLifecycleManager.Repositories;
 using DataLifecycleManager.Logging;
 using DataLifecycleManager.Services;
 using Serilog;
@@ -47,21 +51,22 @@ public class Program
             .UseSerilog((context, services, loggerConfiguration) =>
             {
                 var loggingOptions = context.Configuration
-                    .GetSection("Logging")
+                    .GetSection("AppLogging")
                     .Get<AppLoggingOptions>() ?? new AppLoggingOptions();
 
                 SerilogConfigurator.Configure(loggerConfiguration, loggingOptions);
             })
             .ConfigureServices((context, services) =>
             {
-                // 把原本 builder.Services.xxx 的東西搬到這裡
-                services.Configure<ArchiveSettings>(
-                    context.Configuration.GetSection("ArchiveSettings"));
+                services.Configure<ArchiveDefaultsOptions>(
+                    context.Configuration.GetSection("ArchiveDefaults"));
 
                 services.Configure<AppLoggingOptions>(
-                    context.Configuration.GetSection("Logging"));
+                    context.Configuration.GetSection("AppLogging"));
 
                 services.AddSingleton<SqlConnectionFactory>();
+                services.AddSingleton<IArchiveJobRepository, ArchiveJobRepository>();
+                services.AddSingleton<IArchiveSettingsProvider, DbArchiveSettingsProvider>();
                 services.AddSingleton<RetryPolicyExecutor>();
                 services.AddSingleton<ArchiveCoordinator>();
                 services.AddHostedService<Worker>();
