@@ -17,10 +17,10 @@ public class RetryPolicyExecutor
     /// </summary>
     /// <param name="logger">紀錄器。</param>
     /// <param name="options">包含重試設定的組態來源。</param>
-    public RetryPolicyExecutor(ILogger<RetryPolicyExecutor> logger, IOptions<ArchiveSettings> options)
+    public RetryPolicyExecutor(ILogger<RetryPolicyExecutor> logger, IOptions<RetryPolicySettings> options)
     {
         _logger = logger;
-        _settings = options.Value.RetryPolicy;
+        _settings = options.Value;
     }
 
     /// <summary>

@@ -1,30 +1,50 @@
-# 資料歸檔排程系統說明
+# MVC 版資料歸檔與搬移流程說明
 
-本專案實作以 SQL Server + C# 背景常駐服務（WinExe）為基礎的資料歸檔機制，採用 Dapper 進行資料存取並搭配 Serilog 記錄執行過程。
+本專案已改寫為 ASP.NET Core 8 MVC 單一 Web 專案。所有搬移參數改由 Web 介面填寫並寫入設定資料表，使用者在需要時按下「開始搬移」才會同步執行一次 DB1 → DB2 → CSV → Delete 的流程。
+
+## 專案分層
+- **Controllers**：`ArchiveSettingsController` 提供設定維護與觸發搬移的 Action。
+- **ViewModels**：`ArchiveSettingInputModel`、`ArchiveSettingsPageViewModel` 對應設定表單、列表與執行結果。
+- **Repositories**：`ArchiveSettingRepository` 以 Dapper 讀寫設定資料表（ConnectionName=ConfigurationDb）。
+- **Services**：`ArchiveExecutionService` 執行搬移主流程，`RetryPolicyExecutor` 提供可設定的重試機制，`SqlConnectionFactory` 依連線名稱建立 `SqlConnection`。
+- **Views**：`Views/ArchiveSettings/Index.cshtml` 使用 Bootstrap 呈現設定表單、設定列表與「開始搬移」按鈕。
+- **Configuration**：`CsvOptions` 與 `RetryPolicySettings` 為固定參數（分隔符、檔名格式、重試次數等），透過 `appsettings.json` 載入。
+
+## 設定資料表建議結構
+```sql
+CREATE TABLE dbo.ArchiveSettings
+(
+    Id INT IDENTITY(1,1) PRIMARY KEY,
+    SourceConnectionName NVARCHAR(100) NOT NULL,
+    TargetConnectionName NVARCHAR(100) NOT NULL,
+    TableName            NVARCHAR(128) NOT NULL,
+    DateColumn           NVARCHAR(128) NOT NULL,
+    PrimaryKeyColumn     NVARCHAR(128) NOT NULL,
+    OnlineRetentionMonths  INT NOT NULL,
+    HistoryRetentionMonths INT NOT NULL,
+    BatchSize              INT NOT NULL,
+    CsvEnabled             BIT NOT NULL,
+    CsvRootFolder          NVARCHAR(512) NOT NULL
+);
+```
 
 ## 執行流程
-1. **Host 啟動**：`Program` 透過 Serilog 引導式 logger 啟動，載入 `appsettings.json` 的連線與歸檔設定，註冊 `Worker` 常駐服務。
-2. **週期排程**：`Worker` 在啟動時先執行一次歸檔流程，之後每 24 小時再執行一次。任何例外都會寫入日誌並於下一次週期再試。
-3. **搬移線上庫 → 歷史庫**：`ArchiveCoordinator` 逐表讀取設定，使用 `TransactionScope` 在同一批次中先插入 DB2 再刪除 DB1，確保不會只搬一半資料。搬移時以日期欄位判斷超過保留期的資料並依批次大小處理。
-4. **歷史庫 → CSV**：當資料在歷史庫中也超過保留期時，批次抓取後依檔案上限分段輸出 CSV，並根據表名與年月建立資料夾；輸出成功後刪除已匯出的資料。
-5. **重試策略**：每個搬移或匯出批次都套用簡易重試策略（次數與延遲可配置），避免短暫錯誤阻塞整體流程。
+1. **儲存設定**：使用者於 `/ArchiveSettings/Index` 填完表單後提交，`ArchiveSettingsController.Save` 透過 `ArchiveSettingRepository.UpsertAsync` 寫入設定表。
+2. **開始搬移**：按下「開始搬移」按鈕後，`ArchiveSettingsController.Run` 呼叫 `ArchiveExecutionService.RunOnceAsync`。
+3. **搬移線上庫 → 歷史庫**：`ArchiveExecutionService` 依設定抓取超過 `OnlineRetentionMonths` 的資料，使用 `DynamicSqlHelper.BuildInsertSql`（內含 `NOT EXISTS`）寫入目標庫，再以 `IN (@Ids)` 批次刪除來源庫資料。
+4. **歷史庫 → CSV**：若 `CsvEnabled`，則針對超過 `HistoryRetentionMonths` 的歷史資料批次匯出 CSV（依 `CsvOptions.MaxRowsPerFile` 分段，檔名使用 `CsvOptions.FileNameFormat`），成功後以 `IN (@Ids)` 刪除目標庫批次。
+5. **重試與日誌**：每個批次包在 `RetryPolicyExecutor` 中，依 `RetryPolicySettings` 決定重試次數與間隔；Serilog 透過 `AppLoggingOptions` 設定輸出。
 
-## 設定重點
-- `appsettings.json` 中的 `ArchiveSettings` 提供預設批次大小、保留月數、CSV 參數以及表級覆蓋設定。
-- `ConnectionStrings` 指定 DB1/DB2 連線；`Logging` 控制 Serilog 最小等級、檔案/Seq sink 行為。
+## 重要實作注意事項
+- **無背景排程**：不再註冊 `BackgroundService`，所有搬移皆由使用者手動觸發。
+- **Dapper 操作**：查詢、插入、刪除全數使用 Dapper 的 `CommandDefinition`，並透過 `SqlConnectionFactory` 以連線名稱存取不同資料庫。
+- **避免分散式交易**：不使用 `TransactionScope`；採取「先插入目標庫，再刪除來源庫」的順序，並以冪等 `NOT EXISTS` 保證重複執行安全。
+- **CSV 安全性**：匯出時自動建立目錄，值會依分隔符號跳脫並以 UTF-8 BOM 編碼輸出。
 
-## 模組化設計
-- `SqlConnectionFactory`：統一依連線名稱產生 `SqlConnection`。
-- `RetryPolicyExecutor`：包裝可配置的重試邏輯。
-- `ArchiveCoordinator`：核心協調器，負責搬移與匯出流程、CSV 寫檔與刪除。
-- `DynamicSqlHelper`：根據動態資料列產生 Insert/Delete SQL，避免硬編碼欄位。
-
-## 可靠性與防呆
-- 每批次操作使用交易範圍確保「插入成功才刪除」。
-- Insert 語句內含 `NOT EXISTS`，以主鍵避免重複搬移。
-- CSV 輸出前先建立資料夾並寫入表頭；內容值會做分隔符號跳脫。
-- 以批次分段讀寫避免鎖表與記憶體壓力。
+## 前端互動
+- 使用 Bootstrap 5 表單與表格，提供基本的前端驗證（jQuery Validate）。
+- 最新執行結果會在右側卡片顯示，包含成功 / 失敗標示與訊息列表。
 
 ## 延伸建議
-- 若環境允許 MSDTC，可將 `TransactionScope` 調整為特定隔離層級。
-- 可在 `Tables` 中加入更多欄位過濾或排序需求，以適配不同場景。
+- 可增加「編輯 / 刪除設定」Action 以便維護。
+- 可將「開始搬移」改成發送 BackgroundJob（例如 Hangfire）以避免長時間佔用要求，若日後需要非同步化。

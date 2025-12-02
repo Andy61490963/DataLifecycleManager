@@ -1,69 +1,69 @@
 using DataLifecycleManager.Configuration;
 using DataLifecycleManager.Infrastructure;
 using DataLifecycleManager.Logging;
+using DataLifecycleManager.Repositories;
 using DataLifecycleManager.Services;
 using Serilog;
 
 namespace DataLifecycleManager;
 
 /// <summary>
-/// 主程式入口，建立 Host 並註冊排程服務。
+/// MVC 應用程式入口，負責建置 WebApplication 並註冊 MVC 相關服務。
 /// </summary>
 public class Program
 {
     /// <summary>
-    /// 建置並啟動背景常駐服務。
+    /// 建置並啟動 ASP.NET Core MVC 應用程式。
     /// </summary>
     /// <param name="args">啟動參數。</param>
     public static void Main(string[] args)
     {
-        // 先建一個 bootstrap logger，讓 Program 啟動階段也有 log
         Log.Logger = SerilogConfigurator.CreateBootstrapLogger();
 
-        try
+        var builder = WebApplication.CreateBuilder(args);
+
+        builder.Host.UseSerilog((context, services, loggerConfiguration) =>
         {
-            CreateHostBuilder(args).Build().Run();
-        }
-        catch (Exception ex)
+            var loggingOptions = context.Configuration
+                .GetSection("AppLogging")
+                .Get<AppLoggingOptions>() ?? new AppLoggingOptions();
+
+            SerilogConfigurator.Configure(loggerConfiguration, loggingOptions);
+        });
+
+        builder.Services.Configure<AppLoggingOptions>(builder.Configuration.GetSection("AppLogging"));
+        builder.Services.Configure<RetryPolicySettings>(builder.Configuration.GetSection("RetryPolicy"));
+        builder.Services.Configure<CsvOptions>(builder.Configuration.GetSection("CsvOptions"));
+
+        builder.Services.AddSingleton<SqlConnectionFactory>();
+        builder.Services.AddSingleton<RetryPolicyExecutor>();
+        builder.Services.AddScoped<IArchiveSettingRepository, ArchiveSettingRepository>();
+        builder.Services.AddScoped<ArchiveExecutionService>();
+
+        builder.Services.AddControllersWithViews();
+
+        var app = builder.Build();
+
+        if (app.Environment.IsDevelopment())
         {
-            // 啟動階段或 Host.Run 期間如果炸掉，這邊會記錄
-            Log.Fatal(ex, "Application terminated unexpectedly");
+            app.UseDeveloperExceptionPage();
         }
-        finally
+        else
         {
-            // 確保 buffer 裡的 log 都寫完
-            Log.CloseAndFlush();
+            app.UseExceptionHandler("/Home/Error");
+            app.UseHsts();
         }
+
+        app.UseHttpsRedirection();
+        app.UseStaticFiles();
+
+        app.UseRouting();
+        app.UseAuthorization();
+
+        app.MapControllerRoute(
+            name: "default",
+            pattern: "{controller=ArchiveSettings}/{action=Index}/{id?}");
+
+        app.Run();
     }
-
-    /// <summary>
-    /// 建立 IHostBuilder 並註冊服務與 Serilog。
-    /// </summary>
-    /// <param name="args">啟動參數。</param>
-    /// <returns>IHostBuilder 實例。</returns>
-    public static IHostBuilder CreateHostBuilder(string[] args) =>
-        Host.CreateDefaultBuilder(args)
-            // 這裡就可以用 UseSerilog，因為現在是 IHostBuilder
-            .UseSerilog((context, services, loggerConfiguration) =>
-            {
-                var loggingOptions = context.Configuration
-                    .GetSection("Logging")
-                    .Get<AppLoggingOptions>() ?? new AppLoggingOptions();
-
-                SerilogConfigurator.Configure(loggerConfiguration, loggingOptions);
-            })
-            .ConfigureServices((context, services) =>
-            {
-                // 把原本 builder.Services.xxx 的東西搬到這裡
-                services.Configure<ArchiveSettings>(
-                    context.Configuration.GetSection("ArchiveSettings"));
-
-                services.Configure<AppLoggingOptions>(
-                    context.Configuration.GetSection("Logging"));
-
-                services.AddSingleton<SqlConnectionFactory>();
-                services.AddSingleton<RetryPolicyExecutor>();
-                services.AddSingleton<ArchiveCoordinator>();
-                services.AddHostedService<Worker>();
-            });
 }

@@ -1,0 +1,154 @@
+@model ArchiveSettingsPageViewModel
+@{
+    ViewData["Title"] = "資料搬移設定";
+}
+
+<div class="row g-4">
+    <div class="col-lg-8">
+        <div class="card shadow-sm">
+            <div class="card-header">填寫搬移設定</div>
+            <div class="card-body">
+                <form asp-action="Save" method="post" class="row g-3">
+                    @Html.AntiForgeryToken()
+                    <input asp-for="Form.Id" type="hidden" />
+                    <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+
+                    <div class="col-md-6">
+                        <label asp-for="Form.SourceConnectionName" class="form-label"></label>
+                        <input asp-for="Form.SourceConnectionName" class="form-control" />
+                        <span asp-validation-for="Form.SourceConnectionName" class="text-danger"></span>
+                    </div>
+                    <div class="col-md-6">
+                        <label asp-for="Form.TargetConnectionName" class="form-label"></label>
+                        <input asp-for="Form.TargetConnectionName" class="form-control" />
+                        <span asp-validation-for="Form.TargetConnectionName" class="text-danger"></span>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label asp-for="Form.TableName" class="form-label"></label>
+                        <input asp-for="Form.TableName" class="form-control" />
+                        <span asp-validation-for="Form.TableName" class="text-danger"></span>
+                    </div>
+                    <div class="col-md-6">
+                        <label asp-for="Form.PrimaryKeyColumn" class="form-label"></label>
+                        <input asp-for="Form.PrimaryKeyColumn" class="form-control" />
+                        <span asp-validation-for="Form.PrimaryKeyColumn" class="text-danger"></span>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label asp-for="Form.DateColumn" class="form-label"></label>
+                        <input asp-for="Form.DateColumn" class="form-control" />
+                        <span asp-validation-for="Form.DateColumn" class="text-danger"></span>
+                    </div>
+                    <div class="col-md-3">
+                        <label asp-for="Form.OnlineRetentionMonths" class="form-label"></label>
+                        <input asp-for="Form.OnlineRetentionMonths" class="form-control" />
+                        <span asp-validation-for="Form.OnlineRetentionMonths" class="text-danger"></span>
+                    </div>
+                    <div class="col-md-3">
+                        <label asp-for="Form.HistoryRetentionMonths" class="form-label"></label>
+                        <input asp-for="Form.HistoryRetentionMonths" class="form-control" />
+                        <span asp-validation-for="Form.HistoryRetentionMonths" class="text-danger"></span>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label asp-for="Form.BatchSize" class="form-label"></label>
+                        <input asp-for="Form.BatchSize" class="form-control" />
+                        <span asp-validation-for="Form.BatchSize" class="text-danger"></span>
+                    </div>
+                    <div class="col-md-8">
+                        <label asp-for="Form.CsvRootFolder" class="form-label"></label>
+                        <input asp-for="Form.CsvRootFolder" class="form-control" />
+                        <span asp-validation-for="Form.CsvRootFolder" class="text-danger"></span>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="form-check form-switch">
+                            <input asp-for="Form.CsvEnabled" class="form-check-input" />
+                            <label asp-for="Form.CsvEnabled" class="form-check-label"></label>
+                        </div>
+                    </div>
+
+                    <div class="col-12 d-flex justify-content-end gap-2">
+                        <button type="submit" class="btn btn-primary">儲存設定</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="card mt-4 shadow-sm">
+            <div class="card-header">已儲存的設定</div>
+            <div class="card-body">
+                @if (TempData["Success"] is string success)
+                {
+                    <div class="alert alert-success" role="alert">@success</div>
+                }
+
+                <div class="table-responsive">
+                    <table class="table table-striped align-middle">
+                        <thead>
+                        <tr>
+                            <th>Table</th>
+                            <th>來源連線</th>
+                            <th>目標連線</th>
+                            <th>線上保留(月)</th>
+                            <th>歷史保留(月)</th>
+                            <th>Batch</th>
+                            <th>CSV</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        @foreach (var item in Model.ExistingSettings)
+                        {
+                            <tr>
+                                <td>@item.TableName</td>
+                                <td>@item.SourceConnectionName</td>
+                                <td>@item.TargetConnectionName</td>
+                                <td>@item.OnlineRetentionMonths</td>
+                                <td>@item.HistoryRetentionMonths</td>
+                                <td>@item.BatchSize</td>
+                                <td>@(item.CsvEnabled ? "是" : "否")</td>
+                            </tr>
+                        }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card shadow-sm">
+            <div class="card-header">手動執行搬移</div>
+            <div class="card-body">
+                <p class="text-muted">按下「開始搬移」後會依照上方已儲存的設定同步執行一次 DB1 → DB2 → CSV → Delete 流程。</p>
+                <form asp-action="Run" method="post">
+                    <button type="submit" class="btn btn-danger w-100">開始搬移</button>
+                    @Html.AntiForgeryToken()
+                </form>
+            </div>
+        </div>
+
+        @if (Model.ExecutionSucceeded.HasValue)
+        {
+            <div class="card shadow-sm mt-4">
+                <div class="card-header">最新執行結果</div>
+                <div class="card-body">
+                    <div class="alert @(Model.ExecutionSucceeded.Value ? "alert-success" : "alert-danger")" role="alert">
+                        @(Model.ExecutionSucceeded.Value ? "執行成功" : "執行失敗")
+                    </div>
+                    <ul class="list-group list-group-flush">
+                        @foreach (var message in Model.ExecutionMessages)
+                        {
+                            <li class="list-group-item">@message</li>
+                        }
+                    </ul>
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+@section Scripts {
+    <partial name="_ValidationScriptsPartial" />
+}
