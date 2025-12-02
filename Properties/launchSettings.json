@@ -4,6 +4,8 @@
     "DataLifecycleManager": {
       "commandName": "Project",
       "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:7147;http://localhost:5147",
       "environmentVariables": {
         "DOTNET_ENVIRONMENT": "Development"
       }
