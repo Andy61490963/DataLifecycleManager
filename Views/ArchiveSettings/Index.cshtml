@@ -41,14 +41,22 @@
                         <span asp-validation-for="Form.DateColumn" class="text-danger"></span>
                     </div>
                     <div class="col-md-3">
-                        <label asp-for="Form.OnlineRetentionMonths" class="form-label"></label>
-                        <input asp-for="Form.OnlineRetentionMonths" class="form-control" />
-                        <span asp-validation-for="Form.OnlineRetentionMonths" class="text-danger"></span>
+                        <label asp-for="Form.OnlineRetentionDate" class="form-label"></label>
+                        <div class="input-group">
+                            <span class="input-group-text">日期</span>
+                            <input asp-for="Form.OnlineRetentionDate" type="date" class="form-control" />
+                        </div>
+                        <span class="form-text text-muted">搬移線上資料的截止日期需晚於歷史資料。</span>
+                        <span asp-validation-for="Form.OnlineRetentionDate" class="text-danger"></span>
                     </div>
                     <div class="col-md-3">
-                        <label asp-for="Form.HistoryRetentionMonths" class="form-label"></label>
-                        <input asp-for="Form.HistoryRetentionMonths" class="form-control" />
-                        <span asp-validation-for="Form.HistoryRetentionMonths" class="text-danger"></span>
+                        <label asp-for="Form.HistoryRetentionDate" class="form-label"></label>
+                        <div class="input-group">
+                            <span class="input-group-text">日期</span>
+                            <input asp-for="Form.HistoryRetentionDate" type="date" class="form-control" />
+                        </div>
+                        <span class="form-text text-muted">歷史資料保留截止日需早於線上資料截止日。</span>
+                        <span asp-validation-for="Form.HistoryRetentionDate" class="text-danger"></span>
                     </div>
 
                     <div class="col-md-4">
@@ -102,8 +110,8 @@
                             <th>Table</th>
                             <th>來源連線</th>
                             <th>目標連線</th>
-                            <th>線上保留(月)</th>
-                            <th>歷史保留(月)</th>
+                            <th>線上保留截止日</th>
+                            <th>歷史保留截止日</th>
                             <th>Batch</th>
                             <th>CSV</th>
                             <th>啟用</th>
@@ -128,8 +136,8 @@
                                     </div>
                                 </td>
 
-                                <td>@item.OnlineRetentionMonths</td>
-                                <td>@item.HistoryRetentionMonths</td>
+                                <td>@item.OnlineRetentionDate.ToString("yyyy-MM-dd")</td>
+                                <td>@item.HistoryRetentionDate.ToString("yyyy-MM-dd")</td>
                                 <td>@item.BatchSize</td>
                                 <td>@(item.CsvEnabled ? "是" : "否")</td>
                                 <td>@(item.Enabled ? "是" : "否")</td>
@@ -219,6 +227,8 @@
                     showExecutionResult(executionResult);
                 </text>
             }
+
+            setupRetentionGuards();
         });
 
         function showExecutionResult(result) {
@@ -239,6 +249,33 @@
             const div = document.createElement('div');
             div.textContent = text ?? '';
             return div.innerHTML;
+        }
+
+        function setupRetentionGuards() {
+            const onlineInput = document.querySelector('[name="Form.OnlineRetentionDate"]');
+            const historyInput = document.querySelector('[name="Form.HistoryRetentionDate"]');
+
+            if (!onlineInput || !historyInput) {
+                return;
+            }
+
+            const updateConstraints = () => {
+                const onlineDate = onlineInput.value ? new Date(onlineInput.value) : null;
+                const historyDate = historyInput.value ? new Date(historyInput.value) : null;
+
+                onlineInput.setCustomValidity('');
+                historyInput.setCustomValidity('');
+
+                if (onlineDate && historyDate && onlineDate <= historyDate) {
+                    const message = '線上資料保留截止日期需晚於歷史資料保留截止日期。';
+                    onlineInput.setCustomValidity(message);
+                    historyInput.setCustomValidity(message);
+                }
+            };
+
+            onlineInput.addEventListener('change', updateConstraints);
+            historyInput.addEventListener('change', updateConstraints);
+            updateConstraints();
         }
     </script>
 }

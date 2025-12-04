@@ -23,11 +23,11 @@ public class ArchiveSetting
     /// <summary>用來做冪等與刪除的主鍵欄位名稱。</summary>
     public required string PrimaryKeyColumn { get; set; }
 
-    /// <summary>線上庫保留的月份數，超過即搬移到歷史庫。</summary>
-    public int OnlineRetentionMonths { get; set; }
+    /// <summary>線上庫保留的最後日期，早於此日期的資料會搬移到歷史庫。</summary>
+    public DateTime OnlineRetentionDate { get; set; }
 
-    /// <summary>歷史庫保留的月份數，超過即匯出 CSV 並刪除。</summary>
-    public int HistoryRetentionMonths { get; set; }
+    /// <summary>歷史庫保留的最後日期，早於此日期的資料會匯出 CSV 並刪除。</summary>
+    public DateTime HistoryRetentionDate { get; set; }
 
     /// <summary>單批處理筆數。</summary>
     public int BatchSize { get; set; }

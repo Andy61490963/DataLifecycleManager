@@ -68,8 +68,17 @@ public class ArchiveExecutionService
 
             foreach (var setting in enabledSettings)
             {
-                var cutoffOnline = DateTime.Now.AddMonths(-setting.OnlineRetentionMonths);
-                var cutoffHistory = DateTime.Now.AddMonths(-setting.HistoryRetentionMonths);
+                var cutoffOnline = setting.OnlineRetentionDate.Date;
+                var cutoffHistory = setting.HistoryRetentionDate.Date;
+
+                if (cutoffOnline <= cutoffHistory)
+                {
+                    _logger.LogWarning(
+                        "設定 {Table} 的線上保留日期 {OnlineCutoff:yyyy-MM-dd} 不得早於或等於歷史保留日期 {HistoryCutoff:yyyy-MM-dd}，已跳過",
+                        setting.TableName, cutoffOnline, cutoffHistory);
+                    messages.Add($"{setting.TableName} 的線上 / 歷史保留日期設定有誤，未執行搬移。");
+                    continue;
+                }
 
                 _logger.LogInformation(
                     "準備搬移 {Table}，線上截止 {OnlineCutoff:yyyy-MM-dd}，歷史截止 {HistoryCutoff:yyyy-MM-dd}",
