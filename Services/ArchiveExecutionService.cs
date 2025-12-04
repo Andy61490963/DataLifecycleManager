@@ -1,3 +1,5 @@
+using System.Data;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -7,6 +9,7 @@ using DataLifecycleManager.Configuration;
 using DataLifecycleManager.Infrastructure;
 using DataLifecycleManager.Models;
 using DataLifecycleManager.Repositories;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -22,7 +25,9 @@ public class ArchiveExecutionService
     private readonly RetryPolicyExecutor _retryPolicyExecutor;
     private readonly CsvOptions _csvOptions;
     private readonly ILogger<ArchiveExecutionService> _logger;
-
+    
+    private const int MaxSqlParametersPerCommand = 1000;
+    
     /// <summary>
     /// 建構子注入 Repository、連線工廠與共用設定。
     /// </summary>
@@ -103,40 +108,94 @@ public class ArchiveExecutionService
     }
 
     /// <summary>
-    /// 從來源資料庫抓取批次資料並搬移到目標資料庫。
+    /// 從來源資料庫抓取批次資料並搬移到目標資料庫（具自適應批次大小）。
     /// </summary>
     private async Task ArchiveOnlineAsync(ArchiveSetting setting, DateTime cutoff, CancellationToken cancellationToken)
     {
+        // 以設定檔 BatchSize 當起點
+        var currentBatchSize = setting.BatchSize > 0 ? setting.BatchSize : 1000;
+
+        // 安全範圍，避免太小或太大
+        const int minBatchSize = 100;
+        const int maxBatchSize = 2000;
+
+        // 希望一批大概在這個時間內完成（秒）
+        const int targetBatchSeconds = 20;
+
         while (!cancellationToken.IsCancellationRequested)
         {
-            var rows = await FetchBatchAsync(setting.SourceConnectionName, setting.TableName, setting.DateColumn, cutoff, setting.BatchSize, cancellationToken);
+            var rows = await FetchBatchAsync(
+                setting.SourceConnectionName,
+                setting.TableName,
+                setting.DateColumn,
+                cutoff,
+                currentBatchSize,
+                cancellationToken);
+
             if (!rows.Any())
             {
                 _logger.LogInformation("{Table} 沒有需要搬移的資料。", setting.TableName);
                 break;
             }
 
+            var sw = Stopwatch.StartNew();
             await MoveBatchAsync(setting, rows, cancellationToken);
+            sw.Stop();
+
+            currentBatchSize = AdjustBatchSize(
+                currentBatchSize,
+                rows.Count,
+                sw.Elapsed,
+                minBatchSize,
+                maxBatchSize,
+                targetBatchSeconds,
+                setting.TableName);
         }
     }
 
     /// <summary>
-    /// 對歷史資料執行匯出與刪除。
+    /// 對歷史資料執行匯出與刪除（具自適應批次大小）。
     /// </summary>
     private async Task ExportHistoryAsync(ArchiveSetting setting, DateTime cutoff, CancellationToken cancellationToken)
     {
+        var currentBatchSize = setting.BatchSize > 0 ? setting.BatchSize : 1000;
+
+        const int minBatchSize = 100;
+        const int maxBatchSize = 2000;
+        const int targetBatchSeconds = 20;
+
         while (!cancellationToken.IsCancellationRequested)
         {
-            var rows = await FetchBatchAsync(setting.TargetConnectionName, setting.TableName, setting.DateColumn, cutoff, setting.BatchSize, cancellationToken);
+            var rows = await FetchBatchAsync(
+                setting.TargetConnectionName,
+                setting.TableName,
+                setting.DateColumn,
+                cutoff,
+                currentBatchSize,
+                cancellationToken);
+
             if (!rows.Any())
             {
                 _logger.LogInformation("{Table} 沒有需要匯出的歷史資料。", setting.TableName);
                 break;
             }
 
+            var sw = Stopwatch.StartNew();
+
             var (fromDate, toDate) = CalculateRange(rows, setting.DateColumn);
             await WriteCsvFilesAsync(rows, setting, fromDate, toDate, cancellationToken);
             await DeleteBatchAsync(setting.TargetConnectionName, setting.TableName, setting.PrimaryKeyColumn, rows, cancellationToken);
+
+            sw.Stop();
+
+            currentBatchSize = AdjustBatchSize(
+                currentBatchSize,
+                rows.Count,
+                sw.Elapsed,
+                minBatchSize,
+                maxBatchSize,
+                targetBatchSeconds,
+                setting.TableName);
         }
     }
 
@@ -190,35 +249,25 @@ public class ArchiveExecutionService
             return key;
         }).ToList();
 
-        await using (var target = _connectionFactory.CreateConnection(setting.TargetConnectionName))
-        {
-            await target.OpenAsync(cancellationToken);
+        var archiveCommandTimeout = 180;
+        
+        await BulkInsertAsync(setting, rows, cancellationToken);
 
-            var parameterBag = rows.Select(row =>
-            {
-                var dp = new DynamicParameters();
-                foreach (var (columnName, value) in row)
-                {
-                    dp.Add(columnName, value);
-                }
-
-                return (object)dp;
-            });
-
-            await target.ExecuteAsync(new CommandDefinition(insertSql, parameterBag, cancellationToken: cancellationToken));
-        }
-
-        await using (var source = _connectionFactory.CreateConnection(setting.SourceConnectionName))
-        {
-            await source.OpenAsync(cancellationToken);
-            await source.ExecuteAsync(new CommandDefinition(deleteSql, new { Ids = primaryKeys }, cancellationToken: cancellationToken));
-        }
+        // 刪除來源（用分批刪除避免 2100 參數限制）
+        await DeleteByPrimaryKeysAsync(
+            setting.SourceConnectionName,
+            setting.TableName,
+            setting.PrimaryKeyColumn,
+            primaryKeys,
+            archiveCommandTimeout,
+            cancellationToken);
 
         _logger.LogInformation("{Table} 搬移 {Count} 筆完成。", setting.TableName, rows.Count);
     }
 
     /// <summary>
-    /// 依主鍵批次刪除資料。
+    /// 依主鍵批次刪除「歷史資料」，內部會呼叫 DeleteByPrimaryKeysAsync，
+    /// 自動依 MaxSqlParametersPerCommand 拆批，避免 SQL Server 2100 參數上限。
     /// </summary>
     private async Task DeleteBatchAsync(
         string connectionName,
@@ -227,23 +276,42 @@ public class ArchiveExecutionService
         IReadOnlyList<IDictionary<string, object?>> rows,
         CancellationToken cancellationToken)
     {
-        var deleteSql = DynamicSqlHelper.BuildDeleteSql(tableName, primaryKeyColumn);
+        if (rows.Count == 0)
+        {
+            return;
+        }
 
+        // 從 rows 裡把主鍵值抽出來，組成 List<object>
         var primaryKeys = rows.Select(row =>
         {
             if (!row.TryGetValue(primaryKeyColumn, out var key))
             {
-                throw new InvalidOperationException($"刪除 {tableName} 時找不到主鍵欄位 {primaryKeyColumn}");
+                throw new InvalidOperationException(
+                    $"刪除 {tableName} 時找不到主鍵欄位 {primaryKeyColumn}");
             }
 
-            return key;
+            if (key is null)
+            {
+                throw new InvalidOperationException(
+                    $"刪除 {tableName} 時主鍵欄位 {primaryKeyColumn} 為空值");
+            }
+
+            return (object)key;
         }).ToList();
 
-        await using var connection = _connectionFactory.CreateConnection(connectionName);
-        await connection.OpenAsync(cancellationToken);
-        await connection.ExecuteAsync(new CommandDefinition(deleteSql, new { Ids = primaryKeys }, cancellationToken: cancellationToken));
+        // 統一走有拆批邏輯的 Helper，避免一次 IN @Ids 塞太多參數
+        await DeleteByPrimaryKeysAsync(
+            connectionName,
+            tableName,
+            primaryKeyColumn,
+            primaryKeys,
+            commandTimeout: null,
+            cancellationToken: cancellationToken);
 
-        _logger.LogInformation("{Table} 刪除 {Count} 筆歷史資料。", tableName, rows.Count);
+        _logger.LogInformation(
+            "{Table} 刪除 {Count} 筆歷史資料。",
+            tableName,
+            rows.Count);
     }
 
     /// <summary>
@@ -354,6 +422,247 @@ public class ArchiveExecutionService
 
         return text;
     }
+    
+    /// <summary>
+    /// 根據單批實際耗時與筆數，自適應調整下一批的 BatchSize。
+    /// </summary>
+    private int AdjustBatchSize(
+        int currentBatchSize,
+        int actualRowCount,
+        TimeSpan elapsed,
+        int minBatchSize,
+        int maxBatchSize,
+        int targetBatchSeconds,
+        string tableName)
+    {
+        if (actualRowCount <= 0)
+        {
+            return currentBatchSize;
+        }
+
+        var elapsedSeconds = elapsed.TotalSeconds;
+
+        // 如果超過目標時間很多（例如 > target * 1.5），就直接對半砍
+        if (elapsedSeconds > targetBatchSeconds * 1.5)
+        {
+            var newSize = Math.Max(minBatchSize, currentBatchSize / 2);
+            if (newSize < currentBatchSize)
+            {
+                _logger.LogInformation(
+                    "{Table} 單批耗時 {Elapsed:F1}s，將 BatchSize 由 {Old} 調降為 {New}",
+                    tableName, elapsedSeconds, currentBatchSize, newSize);
+                return newSize;
+            }
+
+            return currentBatchSize;
+        }
+
+        // 如果跑很快（例如 < target / 2），而且這批有跑滿 currentBatchSize，試著放大
+        if (elapsedSeconds < targetBatchSeconds / 2.0 && actualRowCount >= currentBatchSize)
+        {
+            var newSize = Math.Min(maxBatchSize, currentBatchSize * 2);
+            if (newSize > currentBatchSize)
+            {
+                _logger.LogInformation(
+                    "{Table} 單批耗時 {Elapsed:F1}s 且跑滿 {Count} 筆，將 BatchSize 由 {Old} 調升為 {New}",
+                    tableName, elapsedSeconds, actualRowCount, currentBatchSize, newSize);
+                return newSize;
+            }
+
+            return currentBatchSize;
+        }
+
+        // 其他情況維持現有大小
+        return currentBatchSize;
+    }
+
+    /// <summary>
+    /// 使用 SqlBulkCopy 將單批資料匯入目標表，
+    /// 並在匯入前先過濾掉「歷史表中已存在主鍵」的資料，避免重複寫入。
+    /// 主鍵比較統一轉成字串，並將 IN 參數拆批，避免超過 SQL Server 2100 參數上限。
+    /// </summary>
+    private async Task BulkInsertAsync(
+        ArchiveSetting setting,
+        IReadOnlyList<IDictionary<string, object?>> rows,
+        CancellationToken cancellationToken)
+    {
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        var columns = rows[0].Keys.ToList();
+
+        if (!columns.Contains(setting.PrimaryKeyColumn))
+        {
+            throw new InvalidOperationException(
+                $"BulkInsert {setting.TableName} 時找不到主鍵欄位 {setting.PrimaryKeyColumn}");
+        }
+
+        // 1. 先整理這批要搬的主鍵清單（全部轉成字串）
+        var primaryKeyStrings = rows.Select(row =>
+        {
+            if (!row.TryGetValue(setting.PrimaryKeyColumn, out var key) || key is null)
+            {
+                throw new InvalidOperationException(
+                    $"BulkInsert {setting.TableName} 時主鍵欄位 {setting.PrimaryKeyColumn} 為空值或不存在");
+            }
+
+            var text = Convert.ToString(key, CultureInfo.InvariantCulture);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                throw new InvalidOperationException(
+                    $"BulkInsert {setting.TableName} 時主鍵欄位 {setting.PrimaryKeyColumn} 轉字串後為空值。");
+            }
+
+            return text;
+        }).ToList();
+
+        await using var connection = _connectionFactory.CreateConnection(setting.TargetConnectionName);
+        await connection.OpenAsync(cancellationToken);
+
+        // 2. 查出「歷史表中已存在」的主鍵（拆批避免超過 2100 個參數）
+        var existingIdSql = $"""
+                             SELECT CAST([{setting.PrimaryKeyColumn}] AS NVARCHAR(50)) AS IdText
+                             FROM [{setting.TableName}]
+                             WHERE [{setting.PrimaryKeyColumn}] IN @Ids;
+                             """;
+
+        var existingIds = new HashSet<string>(StringComparer.Ordinal);
+
+        for (var offset = 0; offset < primaryKeyStrings.Count; offset += MaxSqlParametersPerCommand)
+        {
+            var batchIds = primaryKeyStrings
+                .Skip(offset)
+                .Take(MaxSqlParametersPerCommand)
+                .ToList();
+
+            var batchResult = await connection.QueryAsync<string>(
+                new CommandDefinition(
+                    existingIdSql,
+                    new { Ids = batchIds },
+                    cancellationToken: cancellationToken));
+
+            foreach (var id in batchResult)
+            {
+                existingIds.Add(id);
+            }
+        }
+
+        // 3. 過濾掉已存在的 PK，只保留真正要匯入的列
+        var filteredRows = rows
+            .Where(row =>
+            {
+                row.TryGetValue(setting.PrimaryKeyColumn, out var key);
+                if (key is null)
+                {
+                    return false;
+                }
+
+                var text = Convert.ToString(key, CultureInfo.InvariantCulture);
+                return !string.IsNullOrWhiteSpace(text) && !existingIds.Contains(text);
+            })
+            .ToList();
+
+        if (filteredRows.Count == 0)
+        {
+            _logger.LogInformation(
+                "{Table} 此批 {Total} 筆資料在歷史表皆已存在，略過 BulkInsert。",
+                setting.TableName,
+                rows.Count);
+            return;
+        }
+
+        _logger.LogInformation(
+            "{Table} 此批 {Total} 筆資料中，有 {Skipped} 筆已存在歷史表，實際匯入 {Inserted} 筆。",
+            setting.TableName,
+            rows.Count,
+            rows.Count - filteredRows.Count,
+            filteredRows.Count);
+
+        // 4. 建 DataTable schema（用所有欄位，跟原本一樣）
+        var table = new DataTable();
+        foreach (var column in columns)
+        {
+            table.Columns.Add(column, typeof(object));
+        }
+
+        // 5. 只把「未存在」的列塞進 DataTable
+        foreach (var row in filteredRows)
+        {
+            var dataRow = table.NewRow();
+            foreach (var column in columns)
+            {
+                row.TryGetValue(column, out var value);
+                dataRow[column] = value ?? DBNull.Value;
+            }
+            table.Rows.Add(dataRow);
+        }
+
+        // 6. 用 SqlBulkCopy 寫進去（沿用同一個 connection）
+        if (connection is not SqlConnection sqlConnection)
+        {
+            throw new InvalidOperationException("BulkInsert 只支援 SqlConnection。");
+        }
+
+        using var bulkCopy = new SqlBulkCopy(sqlConnection)
+        {
+            DestinationTableName = setting.TableName,
+            BulkCopyTimeout = 180,                 // 秒，可抽成共用設定
+            BatchSize = filteredRows.Count         // 這批實際要寫入的筆數
+        };
+
+        foreach (var column in columns)
+        {
+            bulkCopy.ColumnMappings.Add(column, column);
+        }
+
+        await bulkCopy.WriteToServerAsync(table, cancellationToken);
+    }
+    
+    /// <summary>
+    /// 依主鍵清單，分批執行 DELETE，避免 IN @Ids 超過 2100 個參數。
+    /// </summary>
+    private async Task DeleteByPrimaryKeysAsync(
+        string connectionName,
+        string tableName,
+        string primaryKeyColumn,
+        IReadOnlyList<object> primaryKeys,
+        int? commandTimeout,
+        CancellationToken cancellationToken)
+    {
+        if (primaryKeys.Count == 0)
+        {
+            return;
+        }
+
+        var deleteSql = DynamicSqlHelper.BuildDeleteSql(tableName, primaryKeyColumn);
+
+        await using var connection = _connectionFactory.CreateConnection(connectionName);
+        await connection.OpenAsync(cancellationToken);
+
+        for (var offset = 0; offset < primaryKeys.Count; offset += MaxSqlParametersPerCommand)
+        {
+            var batch = primaryKeys
+                .Skip(offset)
+                .Take(MaxSqlParametersPerCommand)
+                .ToList();
+
+            var cmd = new CommandDefinition(
+                deleteSql,
+                new { Ids = batch },
+                commandTimeout: commandTimeout,
+                cancellationToken: cancellationToken);
+
+            await connection.ExecuteAsync(cmd);
+        }
+
+        _logger.LogInformation(
+            "{Table} 依主鍵分批刪除完成，共刪除 {Count} 筆資料。",
+            tableName,
+            primaryKeys.Count);
+    }
+
 }
 
 /// <summary>
