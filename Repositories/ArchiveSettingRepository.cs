@@ -24,7 +24,7 @@ public class ArchiveSettingRepository : IArchiveSettingRepository
     /// <inheritdoc />
     public async Task<IReadOnlyList<ArchiveSetting>> GetAllAsync(CancellationToken cancellationToken)
     {
-        const string sql = "SELECT Id, SourceConnectionName, TargetConnectionName, TableName, DateColumn, PrimaryKeyColumn, OnlineRetentionDate, HistoryRetentionDate, BatchSize, CsvEnabled, CsvRootFolder, Enabled FROM dbo.ArchiveSettings ORDER BY TableName";
+        const string sql = "SELECT Id, SourceConnectionName, TargetConnectionName, TableName, DateColumn, PrimaryKeyColumn, OnlineRetentionDate, HistoryRetentionDate, BatchSize, CsvEnabled, CsvRootFolder, ISNULL(IsPhysicalDeleteEnabled, 1) AS IsPhysicalDeleteEnabled, Enabled FROM dbo.ArchiveSettings ORDER BY TableName";
 
         await using var connection = _connectionFactory.CreateConnection(ConfigurationConnectionName);
         await connection.OpenAsync(cancellationToken);
@@ -36,7 +36,7 @@ public class ArchiveSettingRepository : IArchiveSettingRepository
     /// <inheritdoc />
     public async Task<ArchiveSetting?> GetByIdAsync(int id, CancellationToken cancellationToken)
     {
-        const string sql = "SELECT Id, SourceConnectionName, TargetConnectionName, TableName, DateColumn, PrimaryKeyColumn, OnlineRetentionDate, HistoryRetentionDate, BatchSize, CsvEnabled, CsvRootFolder, Enabled FROM dbo.ArchiveSettings WHERE Id = @Id";
+        const string sql = "SELECT Id, SourceConnectionName, TargetConnectionName, TableName, DateColumn, PrimaryKeyColumn, OnlineRetentionDate, HistoryRetentionDate, BatchSize, CsvEnabled, CsvRootFolder, ISNULL(IsPhysicalDeleteEnabled, 1) AS IsPhysicalDeleteEnabled, Enabled FROM dbo.ArchiveSettings WHERE Id = @Id";
 
         await using var connection = _connectionFactory.CreateConnection(ConfigurationConnectionName);
         await connection.OpenAsync(cancellationToken);
@@ -60,6 +60,7 @@ public class ArchiveSettingRepository : IArchiveSettingRepository
                 BatchSize,
                 CsvEnabled,
                 CsvRootFolder,
+                IsPhysicalDeleteEnabled,
                 Enabled)
             VALUES (
                 @SourceConnectionName,
@@ -72,6 +73,7 @@ public class ArchiveSettingRepository : IArchiveSettingRepository
                 @BatchSize,
                 @CsvEnabled,
                 @CsvRootFolder,
+                @IsPhysicalDeleteEnabled,
                 @Enabled);
             SELECT CAST(SCOPE_IDENTITY() AS INT);
             """;
@@ -88,6 +90,7 @@ public class ArchiveSettingRepository : IArchiveSettingRepository
                 BatchSize               = @BatchSize,
                 CsvEnabled              = @CsvEnabled,
                 CsvRootFolder           = @CsvRootFolder,
+                IsPhysicalDeleteEnabled = @IsPhysicalDeleteEnabled,
                 Enabled                 = @Enabled
             WHERE Id = @Id;
             SELECT @Id;

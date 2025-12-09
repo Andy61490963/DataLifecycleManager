@@ -266,7 +266,7 @@ public class ArchiveExecutionService
     }
 
     /// <summary>
-    /// 單批：線上庫 → 歷史庫，BulkInsert + 刪除來源。
+    /// 單批：線上庫 → 歷史庫，BulkInsert，並視設定決定是否刪除來源資料。
     /// </summary>
     private async Task MoveBatchAsync(
         ArchiveSetting setting,
@@ -297,16 +297,29 @@ public class ArchiveExecutionService
         // 1. 寫到歷史庫（內部會先查歷史庫已存在 PK，避免 PK 衝突）
         await BulkInsertAsync(setting, rows, cancellationToken);
 
-        // 2. 刪掉來源庫的這批資料（走拆批邏輯，避免 2100 參數）
-        await DeleteByPrimaryKeysAsync(
-            setting.SourceConnectionName,
-            setting.TableName,
-            setting.PrimaryKeyColumn,
-            primaryKeys,
-            archiveCommandTimeout,
-            cancellationToken);
+        if (setting.IsPhysicalDeleteEnabled)
+        {
+            // 2. 刪掉來源庫的這批資料（走拆批邏輯，避免 2100 參數）
+            await DeleteByPrimaryKeysAsync(
+                setting.SourceConnectionName,
+                setting.TableName,
+                setting.PrimaryKeyColumn,
+                primaryKeys,
+                archiveCommandTimeout,
+                cancellationToken);
 
-        _logger.LogInformation("{Table} 搬移 {Count} 筆完成。", setting.TableName, rows.Count);
+            _logger.LogInformation(
+                "{Table} 搬移 {Count} 筆完成（已刪除來源資料）。",
+                setting.TableName,
+                rows.Count);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "{Table} 搬移 {Count} 筆完成（保留來源資料）。",
+                setting.TableName,
+                rows.Count);
+        }
     }
 
     /// <summary>

@@ -79,6 +79,14 @@
 
                     <div class="col-12">
                         <div class="form-check form-switch">
+                            <input asp-for="Form.IsPhysicalDeleteEnabled" class="form-check-input" />
+                            <label asp-for="Form.IsPhysicalDeleteEnabled" class="form-check-label"></label>
+                        </div>
+                        <span class="form-text text-muted">關閉後只搬移資料，不會刪除來源庫。</span>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="form-check form-switch">
                             <input asp-for="Form.Enabled" class="form-check-input" />
                             <label asp-for="Form.Enabled" class="form-check-label"></label>
                         </div>
@@ -113,6 +121,7 @@
                             <th>線上保留截止日</th>
                             <th>歷史保留截止日</th>
                             <th>Batch</th>
+                            <th>搬移後刪除</th>
                             <th>CSV</th>
                             <th>啟用</th>
                             <th class="text-end">操作</th>
@@ -139,6 +148,7 @@
                                 <td>@item.OnlineRetentionDate.ToString("yyyy-MM-dd")</td>
                                 <td>@item.HistoryRetentionDate.ToString("yyyy-MM-dd")</td>
                                 <td>@item.BatchSize</td>
+                                <td>@(item.IsPhysicalDeleteEnabled ? "是" : "否")</td>
                                 <td>@(item.CsvEnabled ? "是" : "否")</td>
                                 <td>@(item.Enabled ? "是" : "否")</td>
                                 <td class="text-end">
