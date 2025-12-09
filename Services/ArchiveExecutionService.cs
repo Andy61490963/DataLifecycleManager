@@ -19,6 +19,7 @@ namespace DataLifecycleManager.Services;
 /// 2. 線上庫符合條件的資料批次搬到歷史庫（ArchiveOnline）
 /// 3. 歷史庫符合更舊的資料批次匯出 CSV 並刪除（ExportHistory）
 /// 4. 透過游標式批次查詢 + 自適應 BatchSize 避免無窮迴圈與效能炸掉
+/// 5. 透過 ArchiveJobRun / ArchiveJobRunDetail 紀錄每次執行與每個 Table 的結果
 /// </summary>
 public class ArchiveExecutionService
 {
@@ -27,6 +28,7 @@ public class ArchiveExecutionService
     private readonly RetryPolicyExecutor _retryPolicyExecutor;
     private readonly CsvOptions _csvOptions;
     private readonly ILogger<ArchiveExecutionService> _logger;
+    private readonly ArchiveJobLogService _archiveJobLogService;
     
     /// <summary>
     /// SQL Server 單次 Command 最多 2100 個參數，這裡保守抓 1000。
@@ -42,19 +44,22 @@ public class ArchiveExecutionService
         SqlConnectionFactory connectionFactory,
         RetryPolicyExecutor retryPolicyExecutor,
         IOptions<CsvOptions> csvOptions,
-        ILogger<ArchiveExecutionService> logger)
+        ILogger<ArchiveExecutionService> logger,
+        ArchiveJobLogService archiveJobLogService)
     {
         _settingRepository = settingRepository;
         _connectionFactory = connectionFactory;
         _retryPolicyExecutor = retryPolicyExecutor;
         _csvOptions = csvOptions.Value;
         _logger = logger;
+        _archiveJobLogService = archiveJobLogService;
     }
 
     /// <summary>
     /// 讀取所有設定並同步執行一次搬移流程。
     /// 一次 Run：
-    /// - 針對每個啟用的 ArchiveSetting：
+    /// - 建立一筆 ArchiveJobRun（整體 Job）
+    /// - 針對每個啟用的 ArchiveSetting 建立 ArchiveJobRunDetail
     ///   1. 線上庫搬到歷史庫
     ///   2. 需要的話再做歷史庫匯出 + 刪除
     /// </summary>
@@ -76,12 +81,34 @@ public class ArchiveExecutionService
                 return new MigrationResult(true, messages);
             }
 
-            // 一個 Table 設定一個搬移流程
+            // 建立整體 Job Run log（ArchiveJobRun）
+            var jobRun = new ArchiveJobRunLog
+            {
+                JobRunId = Guid.NewGuid(),
+                StartedAt = DateTime.UtcNow,
+                EndedAt = null,
+                Status = ArchiveJobStatus.Running,
+                HostName = Environment.MachineName,
+                TotalTables = enabledSettings.Count,
+                SucceededTables = 0,
+                FailedTables = 0,
+                Message = null
+            };
+
+            await _archiveJobLogService.CreateJobRunAsync(jobRun, cancellationToken);
+
+            var succeededTables = 0;
+            var failedTables = 0;
+
+            // 一個 Table 設定一個搬移流程（也就是一筆 ArchiveJobRunDetail）
             foreach (var setting in enabledSettings)
             {
                 // 線上 / 歷史的 cutoff 日，只吃日期部分（去掉時間）
                 var cutoffOnline = setting.OnlineRetentionDate.Date;
                 var cutoffHistory = setting.HistoryRetentionDate.Date;
+
+                // 先建立一筆 Detail Log 的快照（把當下設定存起來）
+                var detailLog = CreateDetailLogSnapshot(jobRun.JobRunId, setting, cutoffOnline, cutoffHistory);
 
                 // 安全檢查：線上保留一定要 > 歷史保留，否則設定有問題
                 if (cutoffOnline <= cutoffHistory)
@@ -90,6 +117,13 @@ public class ArchiveExecutionService
                         "設定 {Table} 的線上保留日期 {OnlineCutoff:yyyy-MM-dd} 不得早於或等於歷史保留日期 {HistoryCutoff:yyyy-MM-dd}，已跳過",
                         setting.TableName, cutoffOnline, cutoffHistory);
                     messages.Add($"{setting.TableName} 的線上 / 歷史保留日期設定有誤，未執行搬移。");
+
+                    detailLog.Status = ArchiveJobStatus.Skipped;
+                    detailLog.StartedAt = DateTime.UtcNow;
+                    detailLog.EndedAt = DateTime.UtcNow;
+                    detailLog.ErrorMessage = "線上 / 歷史保留日期設定有誤，已跳過。";
+
+                    await _archiveJobLogService.CreateDetailAsync(detailLog, cancellationToken);
                     continue;
                 }
 
@@ -97,40 +131,90 @@ public class ArchiveExecutionService
                     "準備搬移 {Table}，線上截止 {OnlineCutoff:yyyy-MM-dd}，歷史截止 {HistoryCutoff:yyyy-MM-dd}",
                     setting.TableName, cutoffOnline, cutoffHistory);
 
+                // 先把 detail 建起來，狀態標成 Running
+                detailLog.StartedAt = DateTime.UtcNow;
+                detailLog.Status = ArchiveJobStatus.Running;
+                await _archiveJobLogService.CreateDetailAsync(detailLog, cancellationToken);
+
+                // 每個 Table 各自有兩個 counter：
+                // - archiveCounters：線上 → 歷史
+                // - historyCounters：歷史 → CSV + 刪除
+                var archiveCounters = new TableRunCounters();
+                TableRunCounters? historyCounters = setting.CsvEnabled ? new TableRunCounters() : null;
+
                 try
                 {
                     // === Phase 1：線上搬到歷史庫 ===
                     // 透過 RetryPolicy 包起來，搬移失敗會走重試策略
                     await _retryPolicyExecutor.ExecuteAsync(
                         $"{setting.TableName}-Archive",
-                        () => ArchiveOnlineAsync(setting, cutoffOnline, cancellationToken),
+                        () => ArchiveOnlineAsync(setting, cutoffOnline, archiveCounters, cancellationToken),
                         cancellationToken);
 
                     _logger.LogInformation(
                         "-- 線上搬到歷史庫完成 ---------------------------------------------------------------------------------");
-                    
+
                     // === Phase 2：歷史庫匯出 CSV + 刪除歷史 ===
-                    if (setting.CsvEnabled)
+                    if (setting.CsvEnabled && historyCounters != null)
                     {
                         await _retryPolicyExecutor.ExecuteAsync(
                             $"{setting.TableName}-Csv",
-                            () => ExportHistoryAsync(setting, cutoffHistory, cancellationToken),
+                            () => ExportHistoryAsync(setting, cutoffHistory, historyCounters, cancellationToken),
                             cancellationToken);
                     }
 
+                    // 把兩個 phase 的統計數字塞回 Detail Log
+                    MergeCountersIntoDetail(detailLog, archiveCounters, historyCounters);
+
+                    detailLog.Status = ArchiveJobStatus.Success;
+                    detailLog.EndedAt = DateTime.UtcNow;
+
+                    await _archiveJobLogService.UpdateDetailAsync(detailLog, cancellationToken);
+
                     messages.Add(
                         $"{setting.TableName} 搬移完畢（線上>{cutoffOnline:yyyy-MM-dd}；歷史>{cutoffHistory:yyyy-MM-dd}）");
+
+                    succeededTables++;
                 }
                 catch (Exception ex)
                 {
-                    // 單一 Table 發生錯誤就當作這次 Run 失敗（直接 return）
+                    failedTables++;
+
                     _logger.LogError(ex, "搬移 {Table} 時發生錯誤", setting.TableName);
                     messages.Add($"[{setting.TableName}] 發生錯誤：{ex.GetBaseException().Message}");
+
+                    // 故障時，也把目前已有的統計 / 游標 + ErrorMessage 寫回 Detail
+                    detailLog.Status = ArchiveJobStatus.Fail;
+                    detailLog.EndedAt = DateTime.UtcNow;
+                    detailLog.ErrorMessage = ex.GetBaseException().Message;
+
+                    await _archiveJobLogService.UpdateDetailAsync(detailLog, cancellationToken);
+
+                    // 更新 JobRun 狀態後直接結束（跟原本邏輯一樣：單一 Table fail 整次 Run 就當失敗）
+                    jobRun.SucceededTables = succeededTables;
+                    jobRun.FailedTables = failedTables;
+                    jobRun.Status = succeededTables > 0 ? ArchiveJobStatus.PartialFail : ArchiveJobStatus.Fail;
+                    jobRun.EndedAt = DateTime.UtcNow;
+                    jobRun.Message = string.Join(Environment.NewLine, messages);
+
+                    await _archiveJobLogService.UpdateJobRunAsync(jobRun, cancellationToken);
+
                     return new MigrationResult(false, messages);
                 }
             }
 
-            return new MigrationResult(true, messages);
+            // 整體 Job 結束，更新 JobRun Log
+            jobRun.SucceededTables = succeededTables;
+            jobRun.FailedTables = failedTables;
+            jobRun.Status = failedTables == 0
+                ? ArchiveJobStatus.Success
+                : (succeededTables > 0 ? ArchiveJobStatus.PartialFail : ArchiveJobStatus.Fail);
+            jobRun.EndedAt = DateTime.UtcNow;
+            jobRun.Message = string.Join(Environment.NewLine, messages);
+
+            await _archiveJobLogService.UpdateJobRunAsync(jobRun, cancellationToken);
+
+            return new MigrationResult(failedTables == 0, messages);
         }
         catch (Exception ex)
         {
@@ -145,11 +229,12 @@ public class ArchiveExecutionService
 
     /// <summary>
     /// 線上庫 → 歷史庫（只做搬移，不刪歷史）。
-    /// 這裡只決定要用哪個 Connection + cutoff，實際批次邏輯在 ProcessBatchesAsync。
+    /// 回傳值透過 counters 物件往上帶。
     /// </summary>
     private Task ArchiveOnlineAsync(
         ArchiveSetting setting,
         DateTime cutoff,
+        TableRunCounters counters,
         CancellationToken cancellationToken)
     {
         var batchOptions = CreateBatchExecutionOptions(setting);
@@ -160,17 +245,19 @@ public class ArchiveExecutionService
             cutoff,
             batchOptions,
             emptyMessageTemplate: "{Table} 沒有需要搬移的資料。",
-            handleBatchAsync: MoveBatchAsync,  // 單批處理委派給 MoveBatchAsync
-            cancellationToken: cancellationToken);
+            handleBatchAsync: MoveBatchAsync, // 單批處理委派給 MoveBatchAsync
+            counters,
+            cancellationToken);
     }
 
     /// <summary>
     /// 歷史庫 → CSV 匯出 + 刪除歷史資料。
-    /// 同樣走共用批次流程，只是 handleBatch 的邏輯換成「寫檔 + 刪除歷史」。
+    /// 回傳值透過 counters 物件往上帶。
     /// </summary>
     private Task ExportHistoryAsync(
         ArchiveSetting setting,
         DateTime cutoff,
+        TableRunCounters counters,
         CancellationToken cancellationToken)
     {
         var batchOptions = CreateBatchExecutionOptions(setting);
@@ -181,8 +268,11 @@ public class ArchiveExecutionService
             cutoff,
             batchOptions,
             emptyMessageTemplate: "{Table} 沒有需要匯出的歷史資料。",
-            handleBatchAsync: async (s, rows, ct) =>
+            handleBatchAsync: async (s, rows, c, ct) =>
             {
+                // 歷史匯出：來源就是歷史表
+                c.TotalSourceScanned += rows.Count;
+
                 // 依這批資料算出日期範圍，給 CSV 檔名用
                 var (fromDate, toDate) = CalculateRange(rows, s.DateColumn);
 
@@ -191,8 +281,12 @@ public class ArchiveExecutionService
 
                 // 寫檔成功後，刪掉這批歷史資料（依 PK 批次刪除）
                 await DeleteBatchAsync(s.TargetConnectionName, s.TableName, s.PrimaryKeyColumn, rows, ct);
+
+                c.TotalExportedToCsv += rows.Count;
+                c.TotalDeletedFromHistory += rows.Count;
             },
-            cancellationToken: cancellationToken);
+            counters,
+            cancellationToken);
     }
 
     /// <summary>
@@ -200,6 +294,7 @@ public class ArchiveExecutionService
     /// 這裡是最重要的 while 迴圈：
     /// - 使用 (lastDate, lastPrimaryKey) 作為游標，確保每批都往後推進，避免無窮迴圈。
     /// - 使用 AdjustBatchSize 根據耗時自動調整 BatchSize，避免一次塞太多或太小。
+    /// - 統計數字透過 counters 物件往上帶給呼叫端。
     /// </summary>
     private async Task ProcessBatchesAsync(
         ArchiveSetting setting,
@@ -207,7 +302,8 @@ public class ArchiveExecutionService
         DateTime cutoff,
         BatchExecutionOptions options,
         string emptyMessageTemplate,
-        Func<ArchiveSetting, IReadOnlyList<IDictionary<string, object?>>, CancellationToken, Task> handleBatchAsync,
+        Func<ArchiveSetting, IReadOnlyList<IDictionary<string, object?>>, TableRunCounters, CancellationToken, Task> handleBatchAsync,
+        TableRunCounters counters,
         CancellationToken cancellationToken)
     {
         var currentBatchSize = options.InitialBatchSize;
@@ -238,9 +334,9 @@ public class ArchiveExecutionService
                 break;
             }
 
-            // 2. 執行批次處理（搬移 / 匯出 + 刪除）
+            // 2. 執行批次處理（搬移 / 匯出 + 刪除），並累加 counters
             var sw = Stopwatch.StartNew();
-            await handleBatchAsync(setting, rows, cancellationToken);
+            await handleBatchAsync(setting, rows, counters, cancellationToken);
             sw.Stop();
 
             // 3. 更新游標：使用這一批的「最後一筆」
@@ -263,6 +359,10 @@ public class ArchiveExecutionService
 
             // PK 不轉型，保持原本型別（int / guid / long...），後面 SQL 比較會用到
             lastPrimaryKey = pkValue;
+
+            // 把最後處理到哪一筆也記到 counters，方便之後 Resume / Debug
+            counters.LastProcessedDate = lastDate;
+            counters.LastProcessedPrimaryKey = lastPrimaryKey;
             
             // 4. 根據這一批的耗時與筆數，動態調整下一次的 BatchSize
             currentBatchSize = AdjustBatchSize(
@@ -358,10 +458,12 @@ public class ArchiveExecutionService
     /// <summary>
     /// 單批：線上庫 → 歷史庫，BulkInsert，並視設定決定是否刪除來源資料。
     /// - 這個方法只處理「一批」資料，呼叫方會負責 while + 游標。
+    /// - 同時更新 counters（掃多少 / 插多少 / 刪多少）。
     /// </summary>
     private async Task MoveBatchAsync(
         ArchiveSetting setting,
         IReadOnlyList<IDictionary<string, object?>> rows,
+        TableRunCounters counters,
         CancellationToken cancellationToken)
     {
         if (rows.Count == 0)
@@ -369,7 +471,8 @@ public class ArchiveExecutionService
             return;
         }
 
-        var columns = rows[0].Keys.ToList();
+        // 統計這批來源掃了幾筆（線上表）
+        counters.TotalSourceScanned += rows.Count;
 
         // 取出這批的主鍵清單（來源庫）
         // 提前收集 PK，是為了之後 DeleteByPrimaryKeys 使用
@@ -391,6 +494,8 @@ public class ArchiveExecutionService
         var sourceCount = rows.Count;
         var skippedCount = sourceCount - insertedCount;
 
+        counters.TotalInsertedToHistory += insertedCount;
+
         if (setting.IsPhysicalDeleteEnabled)
         {
             // 2. 刪掉來源庫的這批資料（不管有沒有成功插入，都刪）
@@ -401,6 +506,8 @@ public class ArchiveExecutionService
                 primaryKeys,
                 archiveCommandTimeout,
                 cancellationToken);
+
+            counters.TotalDeletedFromSource += primaryKeys.Count;
 
             _logger.LogInformation(
                 "{Table} 搬移批次完成：來源 {Source} 筆，新增 {Inserted} 筆到歷史，刪除來源 {Deleted} 筆（其中 {Skipped} 筆歷史已存在）。",
@@ -492,7 +599,7 @@ public class ArchiveExecutionService
         await using var connection = _connectionFactory.CreateConnection(connectionName);
         await connection.OpenAsync(cancellationToken);
 
-        // 這裡是第二層的「拆批」，避免單次 IN 參數超過 2100 上限
+        // 第二層拆批，避免單次 IN 參數超過 2100 上限
         for (var offset = 0; offset < primaryKeys.Count; offset += MaxSqlParametersPerCommand)
         {
             var batch = primaryKeys
@@ -539,9 +646,6 @@ public class ArchiveExecutionService
         var columns = rows[0].Keys.ToList();
         // 依 config.MaxRowsPerFile 把一大批再切成多批寫入不同檔案
         var chunks = ChunkRows(rows, _csvOptions.MaxRowsPerFile).ToList();
-
-        // 確保資料夾存在（多呼叫沒差）
-        Directory.CreateDirectory(ResolveCsvDirectory(setting, toDate));
 
         for (var i = 0; i < chunks.Count; i++)
         {
@@ -877,6 +981,8 @@ public class ArchiveExecutionService
 
     #endregion
 
+    #region 共用 record / 類別 / helper
+
     /// <summary>
     /// 批次執行的共用設定。
     /// </summary>
@@ -885,6 +991,105 @@ public class ArchiveExecutionService
         int MinBatchSize,
         int MaxBatchSize,
         int TargetBatchSeconds);
+
+    /// <summary>
+    /// 單一 Table、單一 Phase（線上搬移 / 歷史匯出）的統計用計數器。
+    /// </summary>
+    private sealed class TableRunCounters
+    {
+        public int TotalSourceScanned { get; set; }
+        public int TotalInsertedToHistory { get; set; }
+        public int TotalDeletedFromSource { get; set; }
+        public int TotalExportedToCsv { get; set; }
+        public int TotalDeletedFromHistory { get; set; }
+
+        public DateTime? LastProcessedDate { get; set; }
+        public object? LastProcessedPrimaryKey { get; set; }
+    }
+
+    /// <summary>
+    /// 用 ArchiveSetting + cutoff 組出一筆 Detail Log 初始快照。
+    /// 設定快照存到 Log，避免之後設定改了看不懂當時怎麼搬的。
+    /// </summary>
+    private static ArchiveJobRunDetailLog CreateDetailLogSnapshot(
+        Guid jobRunId,
+        ArchiveSetting setting,
+        DateTime cutoffOnline,
+        DateTime cutoffHistory)
+    {
+        var batchSize = setting.BatchSize > 0 ? setting.BatchSize : 1000;
+
+        return new ArchiveJobRunDetailLog
+        {
+            TableRunId = Guid.NewGuid(),
+            JobRunId = jobRunId,
+            // ArchiveSetting 的主鍵：Id (int)
+            SettingId = setting.Id,
+
+            SourceConnectionName = setting.SourceConnectionName,
+            TargetConnectionName = setting.TargetConnectionName,
+            TableName = setting.TableName,
+            DateColumn = setting.DateColumn,
+            PrimaryKeyColumn = setting.PrimaryKeyColumn,
+
+            OnlineRetentionDate = cutoffOnline,
+            HistoryRetentionDate = cutoffHistory,
+
+            BatchSize = batchSize,
+            CsvEnabled = setting.CsvEnabled,
+            CsvRootFolder = setting.CsvRootFolder,
+            IsPhysicalDeleteEnabled = setting.IsPhysicalDeleteEnabled,
+
+            StartedAt = DateTime.MinValue, // 之後會在真正開始時改掉
+            EndedAt = null,
+            Status = ArchiveJobStatus.Running,
+
+            TotalSourceScanned = 0,
+            TotalInsertedToHistory = 0,
+            TotalDeletedFromSource = null,
+            TotalExportedToCsv = 0,
+            TotalDeletedFromHistory = null,
+            LastProcessedDate = null,
+            LastProcessedPrimaryKey = null,
+            ErrorMessage = null
+        };
+    }
+
+    /// <summary>
+    /// 把線上搬移 / 歷史匯出的 counters 合併到 Detail Log。
+    /// </summary>
+    private static void MergeCountersIntoDetail(
+        ArchiveJobRunDetailLog detail,
+        TableRunCounters archiveCounters,
+        TableRunCounters? historyCounters)
+    {
+        detail.TotalSourceScanned =
+            archiveCounters.TotalSourceScanned +
+            (historyCounters?.TotalSourceScanned ?? 0);
+
+        detail.TotalInsertedToHistory = archiveCounters.TotalInsertedToHistory;
+        detail.TotalDeletedFromSource = archiveCounters.TotalDeletedFromSource == 0
+            ? null
+            : archiveCounters.TotalDeletedFromSource;
+
+        if (historyCounters != null)
+        {
+            detail.TotalExportedToCsv = historyCounters.TotalExportedToCsv;
+            detail.TotalDeletedFromHistory = historyCounters.TotalDeletedFromHistory == 0
+                ? null
+                : historyCounters.TotalDeletedFromHistory;
+        }
+
+        var lastDate = historyCounters?.LastProcessedDate ?? archiveCounters.LastProcessedDate;
+        var lastPkObj = historyCounters?.LastProcessedPrimaryKey ?? archiveCounters.LastProcessedPrimaryKey;
+
+        detail.LastProcessedDate = lastDate;
+        detail.LastProcessedPrimaryKey = lastPkObj is null
+            ? null
+            : Convert.ToString(lastPkObj, CultureInfo.InvariantCulture);
+    }
+
+    #endregion
 }
 
 /// <summary>
