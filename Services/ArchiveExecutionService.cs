@@ -960,12 +960,16 @@ public class ArchiveExecutionService
             throw new InvalidOperationException("BulkInsert 只支援 SqlConnection。");
         }
 
-        using var bulkCopy = new SqlBulkCopy(sqlConnection)
+        using var bulkCopy = new SqlBulkCopy(
+            sqlConnection,
+            SqlBulkCopyOptions.KeepIdentity,   // 關鍵：保留來源的 ID
+            null)
         {
             DestinationTableName = setting.TableName,
             BulkCopyTimeout = 180,
             BatchSize = filteredRows.Count
         };
+
 
         // 這裡假設來源欄位名稱 = 目的欄位名稱，一一對應
         foreach (var column in columns)
