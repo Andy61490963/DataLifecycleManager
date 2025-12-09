@@ -28,7 +28,7 @@ public class ArchiveExecutionService
     private readonly RetryPolicyExecutor _retryPolicyExecutor;
     private readonly CsvOptions _csvOptions;
     private readonly ILogger<ArchiveExecutionService> _logger;
-    private readonly ArchiveJobLogService _archiveJobLogService;
+    private readonly IArchiveJobLogService _archiveJobLogService;
     
     /// <summary>
     /// SQL Server 單次 Command 最多 2100 個參數，這裡保守抓 1000。
@@ -45,7 +45,7 @@ public class ArchiveExecutionService
         RetryPolicyExecutor retryPolicyExecutor,
         IOptions<CsvOptions> csvOptions,
         ILogger<ArchiveExecutionService> logger,
-        ArchiveJobLogService archiveJobLogService)
+        IArchiveJobLogService archiveJobLogService)
     {
         _settingRepository = settingRepository;
         _connectionFactory = connectionFactory;

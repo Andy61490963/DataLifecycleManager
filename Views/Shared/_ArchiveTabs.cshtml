@@ -1,0 +1,16 @@
+@model string
+@{
+    var activeTab = (Model ?? "settings").ToLowerInvariant();
+}
+<ul class="nav nav-tabs mb-4">
+    <li class="nav-item">
+        <a class="nav-link @(activeTab == "settings" ? "active" : string.Empty)" href="@Url.Action("Index", "ArchiveSettings")">
+            Archive Settings
+        </a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link @(activeTab == "log" ? "active" : string.Empty)" href="@Url.Action("Index", "ArchiveLog")">
+            Archive Log
+        </a>
+    </li>
+</ul>
