@@ -1,6 +1,7 @@
 # MVC 版資料歸檔與搬移流程說明
 
-本專案已改寫為 ASP.NET Core 8 MVC 單一 Web 專案。所有搬移參數改由 Web 介面填寫並寫入設定資料表，使用者在需要時按下「開始搬移」才會同步執行一次 DB1 → DB2 → CSV → Delete 的流程。
+本專案為 ASP.NET Core 8 MVC 單一 Web 專案。
+所有搬移參數改由 Web 介面填寫並寫入設定資料表，使用者在需要時按下「開始搬移」才會同步執行一次 DB1 → DB2 → CSV → Delete 的流程。
 
 ## 專案分層
 - **Controllers**：`ArchiveSettingsController` 提供設定維護與觸發搬移的 Action。
@@ -12,21 +13,146 @@
 
 ## 設定資料表建議結構
 ```sql
-CREATE TABLE dbo.ArchiveSettings
+USE []
+GO
+/****** Object:  Table [dbo].[ArchiveJobRun] ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[ArchiveJobRun](
+   [JobRunId] [uniqueidentifier] NOT NULL,
+   [StartedAt] [datetime] NOT NULL,
+   [EndedAt] [datetime] NULL,
+   [Status] [nvarchar](max) NOT NULL,
+   [HostName] [nvarchar](max) NULL,
+   [TotalTables] [int] NOT NULL,
+   [SucceededTables] [int] NOT NULL,
+   [FailedTables] [int] NOT NULL,
+   [Message] [nvarchar](max) NULL,
+   CONSTRAINT [PK_ArchiveJobRun] PRIMARY KEY CLUSTERED
 (
-    Id INT IDENTITY(1,1) PRIMARY KEY,
-    SourceConnectionName NVARCHAR(100) NOT NULL,
-    TargetConnectionName NVARCHAR(100) NOT NULL,
-    TableName            NVARCHAR(128) NOT NULL,
-    DateColumn           NVARCHAR(128) NOT NULL,
-    PrimaryKeyColumn     NVARCHAR(128) NOT NULL,
-    OnlineRetentionDate    DATE NOT NULL,
-    HistoryRetentionDate   DATE NOT NULL,
-    BatchSize              INT NOT NULL,
-    CsvEnabled             BIT NOT NULL,
-    CsvRootFolder          NVARCHAR(512) NOT NULL,
-    Enabled                BIT NOT NULL
-);
+[JobRunId] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+   ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+   GO
+/****** Object:  Table [dbo].[ArchiveJobRunDetail] ******/
+   SET ANSI_NULLS ON
+   GO
+   SET QUOTED_IDENTIFIER ON
+   GO
+CREATE TABLE [dbo].[ArchiveJobRunDetail](
+   [TableRunId] [uniqueidentifier] NOT NULL,
+   [JobRunId] [uniqueidentifier] NOT NULL,
+   [SettingId] [int] NOT NULL,
+   [SourceConnectionName] [nvarchar](max) NOT NULL,
+   [TargetConnectionName] [nvarchar](max) NOT NULL,
+   [TableName] [nvarchar](max) NOT NULL,
+   [DateColumn] [nvarchar](max) NOT NULL,
+   [PrimaryKeyColumn] [sysname] NOT NULL,
+   [OnlineRetentionDate] [nvarchar](max) NOT NULL,
+   [HistoryRetentionDate] [date] NOT NULL,
+   [BatchSize] [int] NOT NULL,
+   [CsvEnabled] [bit] NOT NULL,
+   [CsvRootFolder] [nvarchar](max) NOT NULL,
+   [IsPhysicalDeleteEnabled] [bit] NOT NULL,
+   [StartedAt] [datetime] NOT NULL,
+   [EndedAt] [datetime] NULL,
+   [Status] [nvarchar](max) NOT NULL,
+   [TotalSourceScanned] [int] NOT NULL,
+   [TotalInsertedToHistory] [int] NOT NULL,
+   [TotalDeletedFromSource] [int] NULL,
+   [TotalExportedToCsv] [int] NOT NULL,
+   [TotalDeletedFromHistory] [int] NULL,
+   [LastProcessedDate] [datetime] NULL,
+   [LastProcessedPrimaryKey] [nvarchar](max) NULL,
+   [ErrorMessage] [nvarchar](max) NULL,
+   CONSTRAINT [PK_ArchiveJobRunDetail] PRIMARY KEY CLUSTERED
+(
+[TableRunId] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+   ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+   GO
+/****** Object:  Table [dbo].[ArchiveSettings] ******/
+   SET ANSI_NULLS ON
+   GO
+   SET QUOTED_IDENTIFIER ON
+   GO
+CREATE TABLE [dbo].[ArchiveSettings](
+   [Id] [int] IDENTITY(1,1) NOT NULL,
+   [SourceConnectionName] [nvarchar](max) NOT NULL,
+   [TargetConnectionName] [nvarchar](max) NOT NULL,
+   [TableName] [nvarchar](max) NOT NULL,
+   [DateColumn] [nvarchar](max) NOT NULL,
+   [PrimaryKeyColumn] [nvarchar](max) NOT NULL,
+   [OnlineRetentionDate] [date] NOT NULL,
+   [HistoryRetentionDate] [date] NOT NULL,
+   [BatchSize] [int] NOT NULL,
+   [CsvEnabled] [bit] NOT NULL,
+   [CsvRootFolder] [nvarchar](max) NOT NULL,
+   [IsPhysicalDeleteEnabled] [bit] NOT NULL,
+   [Enabled] [bit] NOT NULL,
+   CONSTRAINT [PK_ArchiveSettings] PRIMARY KEY CLUSTERED
+(
+[Id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+   ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+   GO
+ALTER TABLE [dbo].[ArchiveJobRun] ADD  CONSTRAINT [DF_ArchiveJobRun_Status]  DEFAULT (N'Running') FOR [Status]
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail] ADD  CONSTRAINT [DF_ArchiveJobRunDetail_CsvRootFolder]  DEFAULT (N'') FOR [CsvRootFolder]
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail] ADD  CONSTRAINT [DF_ArchiveJobRunDetail_Status]  DEFAULT (N'Running') FOR [Status]
+   GO
+ALTER TABLE [dbo].[ArchiveSettings] ADD  CONSTRAINT [DF_ArchiveSettings_BatchSize]  DEFAULT ((0)) FOR [BatchSize]
+   GO
+ALTER TABLE [dbo].[ArchiveSettings] ADD  CONSTRAINT [DF_ArchiveSettings_CsvEnabled]  DEFAULT ((0)) FOR [CsvEnabled]
+   GO
+ALTER TABLE [dbo].[ArchiveSettings] ADD  CONSTRAINT [DF_ArchiveSettings_CsvRootFolder]  DEFAULT (N'') FOR [CsvRootFolder]
+   GO
+ALTER TABLE [dbo].[ArchiveSettings] ADD  CONSTRAINT [DF_ArchiveSettings_IsPhysicalDeleteEnabled]  DEFAULT ((1)) FOR [IsPhysicalDeleteEnabled]
+   GO
+ALTER TABLE [dbo].[ArchiveSettings] ADD  CONSTRAINT [DF_ArchiveSettings_Enabled]  DEFAULT ((1)) FOR [Enabled]
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail]  WITH CHECK ADD  CONSTRAINT [FK_ArchiveJobRunDetail_ArchiveJobRun] FOREIGN KEY([JobRunId])
+   REFERENCES [dbo].[ArchiveJobRun] ([JobRunId])
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail] CHECK CONSTRAINT [FK_ArchiveJobRunDetail_ArchiveJobRun]
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail]  WITH CHECK ADD  CONSTRAINT [FK_ArchiveJobRunDetail_ArchiveSettings] FOREIGN KEY([SettingId])
+   REFERENCES [dbo].[ArchiveSettings] ([Id])
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail] CHECK CONSTRAINT [FK_ArchiveJobRunDetail_ArchiveSettings]
+   GO
+ALTER TABLE [dbo].[ArchiveJobRun]  WITH CHECK ADD  CONSTRAINT [CK_ArchiveJobRun_Status] CHECK  (([Status]=N'Skipped' OR [Status]=N'Fail' OR [Status]=N'PartialFail' OR [Status]=N'Success' OR [Status]=N'Running'))
+   GO
+ALTER TABLE [dbo].[ArchiveJobRun] CHECK CONSTRAINT [CK_ArchiveJobRun_Status]
+   GO
+ALTER TABLE [dbo].[ArchiveJobRun]  WITH CHECK ADD  CONSTRAINT [CK_ArchiveJobRun_TableCounters] CHECK  (([TotalTables]>=(0) AND [SucceededTables]>=(0) AND [FailedTables]>=(0) AND ([SucceededTables]+[FailedTables])<=[TotalTables]))
+   GO
+ALTER TABLE [dbo].[ArchiveJobRun] CHECK CONSTRAINT [CK_ArchiveJobRun_TableCounters]
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail]  WITH CHECK ADD  CONSTRAINT [CK_ArchiveJobRunDetail_Counters] CHECK  (([TotalSourceScanned]>=(0) AND [TotalInsertedToHistory]>=(0) AND [TotalExportedToCsv]>=(0) AND ([TotalDeletedFromSource] IS NULL OR [TotalDeletedFromSource]>=(0)) AND ([TotalDeletedFromHistory] IS NULL OR [TotalDeletedFromHistory]>=(0)) AND [BatchSize]>=(0)))
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail] CHECK CONSTRAINT [CK_ArchiveJobRunDetail_Counters]
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail]  WITH CHECK ADD  CONSTRAINT [CK_ArchiveJobRunDetail_CsvRootFolder_WhenEnabled] CHECK  (([CsvEnabled]=(0) OR len(ltrim(rtrim([CsvRootFolder])))>(0)))
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail] CHECK CONSTRAINT [CK_ArchiveJobRunDetail_CsvRootFolder_WhenEnabled]
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail]  WITH CHECK ADD  CONSTRAINT [CK_ArchiveJobRunDetail_Status] CHECK  (([Status]=N'Skipped' OR [Status]=N'Fail' OR [Status]=N'PartialFail' OR [Status]=N'Success' OR [Status]=N'Running'))
+   GO
+ALTER TABLE [dbo].[ArchiveJobRunDetail] CHECK CONSTRAINT [CK_ArchiveJobRunDetail_Status]
+   GO
+ALTER TABLE [dbo].[ArchiveSettings]  WITH CHECK ADD  CONSTRAINT [CK_ArchiveSettings_BatchSize_NonNegative] CHECK  (([BatchSize]>=(0)))
+   GO
+ALTER TABLE [dbo].[ArchiveSettings] CHECK CONSTRAINT [CK_ArchiveSettings_BatchSize_NonNegative]
+   GO
+ALTER TABLE [dbo].[ArchiveSettings]  WITH CHECK ADD  CONSTRAINT [CK_ArchiveSettings_CsvRootFolder_WhenEnabled] CHECK  (([CsvEnabled]=(0) OR len(ltrim(rtrim([CsvRootFolder])))>(0)))
+   GO
+ALTER TABLE [dbo].[ArchiveSettings] CHECK CONSTRAINT [CK_ArchiveSettings_CsvRootFolder_WhenEnabled]
+   GO
+
 ```
 
 ## 執行流程
@@ -37,12 +163,6 @@ CREATE TABLE dbo.ArchiveSettings
 4. **搬移線上庫 → 歷史庫**：`ArchiveExecutionService` 依設定抓取「早於 `OnlineRetentionDate`」的資料，使用 `DynamicSqlHelper.BuildInsertSql`（內含 `NOT EXISTS`）寫入目標庫，再以 `IN (@Ids)` 批次刪除來源庫資料。
 5. **歷史庫 → CSV**：若 `CsvEnabled`，則針對「早於 `HistoryRetentionDate`」的歷史資料批次匯出 CSV（依 `CsvOptions.MaxRowsPerFile` 分段，檔名使用 `CsvOptions.FileNameFormat`），成功後以 `IN (@Ids)` 刪除目標庫批次。
 6. **重試與日誌**：每個批次包在 `RetryPolicyExecutor` 中，依 `RetryPolicySettings` 決定重試次數與間隔；Serilog 透過 `AppLoggingOptions` 設定輸出。
-
-## 重要實作注意事項
-- **無背景排程**：不再註冊 `BackgroundService`，所有搬移皆由使用者手動觸發。
-- **Dapper 操作**：查詢、插入、刪除全數使用 Dapper 的 `CommandDefinition`，並透過 `SqlConnectionFactory` 以連線名稱存取不同資料庫。
-- **避免分散式交易**：不使用 `TransactionScope`；採取「先插入目標庫，再刪除來源庫」的順序，並以冪等 `NOT EXISTS` 保證重複執行安全。
-- **CSV 安全性**：匯出時自動建立目錄，值會依分隔符號跳脫並以 UTF-8 BOM 編碼輸出。
 
 ## 前端互動
 - 使用 Bootstrap 5 表單與表格，提供基本的前端驗證（jQuery Validate）。
