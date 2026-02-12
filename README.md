@@ -3,6 +3,87 @@
 本專案為 ASP.NET Core 8 MVC 單一 Web 專案。
 所有搬移參數改由 Web 介面填寫並寫入設定資料表，使用者在需要時按下「開始搬移」才會同步執行一次 DB1 → DB2 → CSV → Delete 的流程。
 
+## 使用方法(只說重點)
+
+### 1. 設定資料庫連線字串
+
+輸入來源（Source DB）與目標（Target DB）資料庫的連線字串，例如：
+
+```
+Server=127.0.0.1,1433;Database=MyDb;User Id=sa;Password=myPassword;TrustServerCertificate=True;
+```
+
+* * *
+
+### 2. 設定資料表資訊
+
+請設定：
+
+* 搬移資料表名稱（TableName）
+
+* 主鍵欄位名稱（PrimaryKeyColumn）
+
+* 日期判斷欄位名稱（DateColumn）
+
+
+> 系統將以 `DateColumn` 作為資料搬移與匯出的判斷依據。
+
+* * *
+
+### 3. 設定資料保留截止日期
+
+需設定兩個日期：
+
+* **線上資料保留截止日期（OnlineRetentionDate）**
+
+* **歷史資料保留截止日期（HistoryRetentionDate）**
+
+
+⚠ **重要規則：**
+
+```
+OnlineRetentionDate 必須晚於 HistoryRetentionDate
+```
+
+* * *
+
+## 判斷邏輯說明
+
+系統以 `DateColumn < 截止日期` 作為判斷條件  
+（僅比較日期部分，不含時間）
+
+資料生命週期如下：
+
+```
+Date >= OnlineRetentionDate
+    → 保留在線上資料庫（Source DB）
+
+HistoryRetentionDate <= Date < OnlineRetentionDate
+    → 存放於歷史資料庫（Target DB）
+
+Date < HistoryRetentionDate
+    → 匯出為 CSV，並從歷史資料庫刪除
+```
+
+* * *
+
+## 範例說明
+
+```
+現在時間                  = 2025-07-01
+線上資料保留截止日期        = 2025-01-01
+歷史資料保留截止日期        = 2024-01-01
+```
+
+則：
+
+| 資料日期 | 狀態 |
+| --- | --- |
+| 2025-03-01 | 存於線上（Source DB） |
+| 2024-06-01 | 存於歷史（Target DB） |
+| 2023-05-01 | 已匯出為 CSV |
+* * *
+
 ## 專案分層
 - **Controllers**：`ArchiveSettingsController` 提供設定維護與觸發搬移的 Action。
 - **ViewModels**：`ArchiveSettingInputModel`、`ArchiveSettingsPageViewModel` 對應設定表單、列表與執行結果。
