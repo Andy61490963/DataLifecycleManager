@@ -38,6 +38,9 @@ public class ArchiveSetting
     /// <summary>CSV 存放根目錄。</summary>
     public required string CsvRootFolder { get; set; }
 
+    /// <summary>搬移完成後是否同步刪除來源資料。</summary>
+    public bool IsPhysicalDeleteEnabled { get; set; }
+
     /// <summary>是否啟用此搬移設定。</summary>
     public bool Enabled { get; set; }
 }

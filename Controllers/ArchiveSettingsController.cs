@@ -82,6 +82,7 @@ public class ArchiveSettingsController : Controller
             BatchSize = form.BatchSize,
             CsvEnabled = form.CsvEnabled,
             CsvRootFolder = form.CsvRootFolder.Trim(),
+            IsPhysicalDeleteEnabled = form.IsPhysicalDeleteEnabled,
             Enabled = form.Enabled
         };
 
@@ -184,6 +185,7 @@ public class ArchiveSettingsController : Controller
                     BatchSize = editing.BatchSize,
                     CsvEnabled = editing.CsvEnabled,
                     CsvRootFolder = editing.CsvRootFolder,
+                    IsPhysicalDeleteEnabled = editing.IsPhysicalDeleteEnabled,
                     Enabled = editing.Enabled
                 }
         };

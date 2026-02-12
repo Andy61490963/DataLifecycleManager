@@ -59,6 +59,10 @@ public class ArchiveSettingInputModel : IValidatableObject
     [Display(Name = "CSV 根目錄")]
     public string CsvRootFolder { get; set; } = string.Empty;
 
+    /// <summary>搬移完成後是否同步刪除來源資料。</summary>
+    [Display(Name = "搬移完成後刪除來源資料")]
+    public bool IsPhysicalDeleteEnabled { get; set; } = true;
+
     /// <summary>是否啟用此搬移設定。</summary>
     [Display(Name = "是否啟用此設定")]
     public bool Enabled { get; set; } = true;

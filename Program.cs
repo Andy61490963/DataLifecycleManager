@@ -37,6 +37,7 @@ public class Program
 
         builder.Services.AddSingleton<SqlConnectionFactory>();
         builder.Services.AddSingleton<RetryPolicyExecutor>();
+        builder.Services.AddScoped<IArchiveJobLogService, ArchiveJobLogService>();
         builder.Services.AddScoped<IArchiveSettingRepository, ArchiveSettingRepository>();
         builder.Services.AddScoped<ArchiveExecutionService>();
 
